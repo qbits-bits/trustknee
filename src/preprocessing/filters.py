@@ -47,12 +47,14 @@ def lowpass_imu(imu: np.ndarray, fs: float = config.IMU_SAMPLING_RATE_HZ) -> np.
 
 
 def correct_drift_imu(
-    imu: np.ndarray, fs: float = config.IMU_SAMPLING_RATE_HZ, method: str = "highpass"
+    imu: np.ndarray, fs: float = config.IMU_SAMPLING_RATE_HZ, method: str = "mean_subtract"
 ) -> np.ndarray:
     """Correct IMU baseline wander / mounting offset.
 
-    method="highpass" (default): high-pass at config.FILTERS.imu_drift_highpass_hz.
-    method="mean_subtract": per-channel mean subtraction, a lighter debug fallback.
+    method="mean_subtract" (default): per-channel mean subtraction.
+    method="highpass": high-pass at config.FILTERS.imu_drift_highpass_hz across all channels.
+    method="gyro_only": high-pass at config.FILTERS.imu_drift_highpass_hz ONLY on gyroscope channels,
+                       preserving the 1g DC gravity vector on accelerometer channels.
     """
     if method == "highpass":
         return _butter_filtfilt(
@@ -62,6 +64,38 @@ def correct_drift_imu(
             config.FILTERS.imu_drift_highpass_order,
             "high",
         )
+    elif method == "gyro_only":
+        # Check if 3D (sensors, channels, T) or 2D (48, T)
+        res = imu.copy()
+        if imu.ndim == 3 and imu.shape[1] >= 6:
+            # Gyro channels are indices 3, 4, 5
+            res[:, 3:6, :] = _butter_filtfilt(
+                res[:, 3:6, :],
+                config.FILTERS.imu_drift_highpass_hz,
+                fs,
+                config.FILTERS.imu_drift_highpass_order,
+                "high",
+            )
+        elif imu.ndim == 2 and imu.shape[0] == config.N_SENSORS * config.IMU_CHANNELS_PER_SENSOR:
+            for s in range(config.N_SENSORS):
+                gyro_start = s * 6 + 3
+                gyro_end = s * 6 + 6
+                res[gyro_start:gyro_end, :] = _butter_filtfilt(
+                    res[gyro_start:gyro_end, :],
+                    config.FILTERS.imu_drift_highpass_hz,
+                    fs,
+                    config.FILTERS.imu_drift_highpass_order,
+                    "high",
+                )
+        else:
+            res = _butter_filtfilt(
+                res,
+                config.FILTERS.imu_drift_highpass_hz,
+                fs,
+                config.FILTERS.imu_drift_highpass_order,
+                "high",
+            )
+        return res
     elif method == "mean_subtract":
         return imu - imu.mean(axis=-1, keepdims=True)
     else:
@@ -69,11 +103,17 @@ def correct_drift_imu(
 
 
 def preprocess_imu(
-    imu: np.ndarray, fs: float = config.IMU_SAMPLING_RATE_HZ, drift_method: str = "highpass"
+    imu: np.ndarray, fs: float = config.IMU_SAMPLING_RATE_HZ, drift_method: str | None = None
 ) -> np.ndarray:
-    """Drift-correct then low-pass smooth IMU data."""
-    corrected = correct_drift_imu(imu, fs=fs, method=drift_method)
-    return lowpass_imu(corrected, fs=fs)
+    """Filter IMU data with zero-phase low-pass smoothing (and optional drift correction).
+
+    By default, drift_method=None so that only low-pass filtering (config.FILTERS.imu_lowpass_hz)
+    is applied. This preserves the 1g DC gravity component on accelerometer channels, which is
+    essential for limb inclination and Range of Motion (ROM) calculations.
+    """
+    if drift_method is not None and drift_method != "none":
+        imu = correct_drift_imu(imu, fs=fs, method=drift_method)
+    return lowpass_imu(imu, fs=fs)
 
 
 def bandpass_emg(emg: np.ndarray, fs: float = config.EMG_SAMPLING_RATE_HZ) -> np.ndarray:
