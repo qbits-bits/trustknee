@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# raw/derived sensor data lives on Drive, not in git
+data/raw/*
+data/interim/*
+data/processed/*
+data/metadata/*
+!data/**/.gitkeep
+
+# this repo's docs/ holds real deliverables (ER diagram + generator),
+# override the global excludesfile's blanket docs/ ignore
+!docs/
+!docs/**
