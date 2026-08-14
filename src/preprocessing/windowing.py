@@ -8,8 +8,8 @@ metadata for tabular Feature Extraction (Random Forest/XGBoost).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
 
 import numpy as np
 import pandas as pd
@@ -30,7 +30,7 @@ class WindowedTrial:
     exercise: str | None
     imu_windows: np.ndarray  # Shape: (n_windows, N_SENSORS, IMU_CHANNELS_PER_SENSOR, samples_imu)
     emg_windows: np.ndarray  # Shape: (n_windows, N_SENSORS, samples_emg)
-    metadata: pd.DataFrame   # Aligned per-window metadata (timestamps, labels, etc.)
+    metadata: pd.DataFrame  # Aligned per-window metadata (timestamps, labels, etc.)
 
     @property
     def n_windows(self) -> int:
@@ -133,7 +133,9 @@ def slice_arrays_to_windows(
         k += 1
 
     if not imu_slices:
-        empty_imu = np.empty((0, config.N_SENSORS, config.IMU_CHANNELS_PER_SENSOR, imu_win_samples), dtype=imu.dtype)
+        empty_imu = np.empty(
+            (0, config.N_SENSORS, config.IMU_CHANNELS_PER_SENSOR, imu_win_samples), dtype=imu.dtype
+        )
         empty_emg = np.empty((0, config.N_SENSORS, emg_win_samples), dtype=emg.dtype)
         return empty_imu, empty_emg, np.array([], dtype=float), np.array([], dtype=float)
 

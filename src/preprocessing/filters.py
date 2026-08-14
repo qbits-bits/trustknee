@@ -31,10 +31,7 @@ from src import config
 
 def _butter_filtfilt(data: np.ndarray, cutoff, fs: float, order: int, btype: str) -> np.ndarray:
     nyq = fs / 2.0
-    if btype == "bandpass":
-        wn = [c / nyq for c in cutoff]
-    else:
-        wn = cutoff / nyq
+    wn = [c / nyq for c in cutoff] if btype == "bandpass" else cutoff / nyq
     b, a = butter(order, wn, btype=btype)
     return filtfilt(b, a, data, axis=-1)
 

@@ -7,8 +7,6 @@ the standardized feature matrix (WindowFeatures) for traditional ML baselines (R
 
 from __future__ import annotations
 
-from typing import Iterable
-
 import numpy as np
 import pandas as pd
 

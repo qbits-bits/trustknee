@@ -1,0 +1,22 @@
+# Git and local configs
+.git
+.gitignore
+.github
+.pre-commit-config.yaml
+setup.sh
+
+# Python cache & virtual environments
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+
+# Data and large local files
+data/raw/*
+data/interim/*
+data/processed/*
+data/metadata/*
+!data/**/.gitkeep
+
