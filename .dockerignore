@@ -1,0 +1,31 @@
+# Git and local configs
+.git
+.gitignore
+.github
+.claude
+.pre-commit-config.yaml
+setup.sh
+
+# Python cache & virtual environments
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+
+# Data and large local files
+data/raw/*
+data/interim/*
+data/processed/*
+data/metadata/*
+!data/**/.gitkeep
+dont-push/
+old/
+
+# Local notes, transcripts & logs
+chat*.txt
+*.log
+trustknee_phase_2_*.md
+phase*.md
+timelines.md
