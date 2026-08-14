@@ -166,7 +166,9 @@ def build_manifest(data_root: Path | str) -> pd.DataFrame:
                     logger.warning("Missing imu.npy/emg.npy in %s, skipping", trial_dir)
                     continue
 
-                participant = participants.loc[subject_id] if subject_id in participants.index else None
+                participant = (
+                    participants.loc[subject_id] if subject_id in participants.index else None
+                )
                 label_row = labels.loc[label_id] if label_id in labels.index else None
                 label_cfg = config.LABELS.get(label_id)
 
@@ -183,9 +185,13 @@ def build_manifest(data_root: Path | str) -> pd.DataFrame:
                         "gender": participant["Gender (M/F)"] if participant is not None else None,
                         # participants.csv header says CM but the values are
                         # meters (e.g. 1.82). Convert so height_cm is real cm.
-                        "height_cm": participant["Height (CM)"] * 100 if participant is not None else None,
+                        "height_cm": participant["Height (CM)"] * 100
+                        if participant is not None
+                        else None,
                         "weight_kg": participant["Weight(KG)"] if participant is not None else None,
-                        "age_years": participant["Age (Years)"] if participant is not None else None,
+                        "age_years": participant["Age (Years)"]
+                        if participant is not None
+                        else None,
                         "injured_leg": participant["Leg"] if participant is not None else None,
                         "pathology": participant["Pathology"] if participant is not None else None,
                     }

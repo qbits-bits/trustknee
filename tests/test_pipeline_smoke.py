@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from src import config
-from src.features import build_feature_matrix, extract_trial_features, extract_window_features
+from src.features import build_feature_matrix, extract_trial_features
 from src.ingestion import build_manifest, load_trial, load_trial_from_manifest_row
 from src.preprocessing import (
     calculate_window_sample_counts,
@@ -255,7 +255,9 @@ def test_feature_extraction_produces_valid_matrix(tmp_path):
     # 1. Test single trial feature extraction
     row = manifest.iloc[0]
     trial = load_trial_from_manifest_row(row)
-    windowed = slice_trial_windows(trial, window_ms=200.0, overlap=0.5, execution="Correct", exercise="Squat")
+    windowed = slice_trial_windows(
+        trial, window_ms=200.0, overlap=0.5, execution="Correct", exercise="Squat"
+    )
     trial_feats_df = extract_trial_features(windowed)
 
     assert not trial_feats_df.empty

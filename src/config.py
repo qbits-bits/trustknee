@@ -64,11 +64,28 @@ LABELS = {
     1: LabelInfo(1, "Wrong", "Squat", "Squat execution with weight transfer on the healthy leg"),
     2: LabelInfo(2, "Wrong", "Squat", "Squat execution placing the injured leg in front"),
     3: LabelInfo(3, "Correct", "Seated leg extension", "Seated leg extension"),
-    4: LabelInfo(4, "Wrong", "Seated leg extension", "Seated leg extension of the injured knee without full range of motion"),
-    5: LabelInfo(5, "Wrong", "Seated leg extension", "Seated leg extension of the injured knee with lifting of the limb from the chair"),
+    4: LabelInfo(
+        4,
+        "Wrong",
+        "Seated leg extension",
+        "Seated leg extension of the injured knee without full range of motion",
+    ),
+    5: LabelInfo(
+        5,
+        "Wrong",
+        "Seated leg extension",
+        "Seated leg extension of the injured knee with lifting of the limb from the chair",
+    ),
     6: LabelInfo(6, "Correct", "Walking", "Walking"),
-    7: LabelInfo(7, "Wrong", "Walking", "Walking with the injured limb (knee joint) not full extended"),
-    8: LabelInfo(8, "Wrong", "Walking", "Walking with the injured limb in full knee extension with hip abduction"),
+    7: LabelInfo(
+        7, "Wrong", "Walking", "Walking with the injured limb (knee joint) not full extended"
+    ),
+    8: LabelInfo(
+        8,
+        "Wrong",
+        "Walking",
+        "Walking with the injured limb in full knee extension with hip abduction",
+    ),
 }
 # Label 7 keeps the source table's own typo ("not full extended") instead of
 # correcting it, so this matches the dataset's documentation exactly.
@@ -76,13 +93,13 @@ LABELS = {
 
 @dataclass(frozen=True)
 class FilterConfig:
-    imu_lowpass_hz: float = 6.0        # see preprocessing/filters.py for why
+    imu_lowpass_hz: float = 6.0  # see preprocessing/filters.py for why
     imu_lowpass_order: int = 4
     imu_drift_highpass_hz: float = 0.3
     imu_drift_highpass_order: int = 2
     emg_bandpass_hz: tuple = (20.0, 450.0)  # sensor's own physiological bandwidth
     emg_bandpass_order: int = 4
-    emg_notch_hz: float = 50.0         # use 60.0 in a 60 Hz mains region
+    emg_notch_hz: float = 50.0  # use 60.0 in a 60 Hz mains region
     emg_notch_q: float = 30.0
 
 
