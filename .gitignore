@@ -20,3 +20,10 @@ trustknee_phase_2_system_architecture_setup.md
 
 # local Claude Code tooling config, not project code
 .claude/
+
+# phase planning docs kept locally, intentionally not tracked in this repo
+/phase-1-submission.md
+/phase2.md
+/phase3.md
+/timelines.md
+/old/
