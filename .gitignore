@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# raw/derived sensor data lives on Drive, not in git
+data/raw/*
+data/interim/*
+data/processed/*
+data/metadata/*
+!data/**/.gitkeep
+
+# AI chat export this session worked from, not a project deliverable
+trustknee_phase_2_system_architecture_setup.md
+
+# this repo's docs/ holds real deliverables (ER diagram + generator),
+# override the global excludesfile's blanket docs/ ignore
+!docs/
+!docs/**
+
+# local Claude Code tooling config, not project code
+.claude/
