@@ -1,5 +1,8 @@
-"""End-to-end smoke test: fabricate a tiny fake KneE-PAD dataset on disk,
-then run build_manifest -> load_trial_from_manifest_row -> preprocessing.
+"""End-to-end smoke tests for TrustKnee pipeline:
+- Manifest construction and metadata validation
+- Preprocessing and low-pass filtering (preserving gravity DC)
+- Sliding-window segmentation across multi-rate IMU and EMG
+- Feature extraction producing standardized ML feature matrix
 """
 
 from __future__ import annotations
@@ -9,8 +12,16 @@ import pandas as pd
 import pytest
 
 from src import config
+from src.features import build_feature_matrix, extract_trial_features, extract_window_features
 from src.ingestion import build_manifest, load_trial, load_trial_from_manifest_row
-from src.preprocessing import correct_drift_imu, preprocess_emg, preprocess_imu
+from src.preprocessing import (
+    calculate_window_sample_counts,
+    correct_drift_imu,
+    preprocess_emg,
+    preprocess_imu,
+    slice_arrays_to_windows,
+    slice_trial_windows,
+)
 
 RNG = np.random.default_rng(42)
 
@@ -126,11 +137,142 @@ def test_manifest_and_pipeline_end_to_end(tmp_path):
     assert np.all(np.isfinite(imu_filtered))
     assert np.all(np.isfinite(emg_filtered))
 
-    # Drift correction should reduce the injected constant-offset mean magnitude.
-    raw_mean_mag = np.abs(trial.imu.mean(axis=-1)).mean()
-    drift_corrected = correct_drift_imu(trial.imu)
-    corrected_mean_mag = np.abs(drift_corrected.mean(axis=-1)).mean()
-    assert corrected_mean_mag < raw_mean_mag
+    # By default, preprocess_imu preserves the constant offset (DC gravity component)
+    raw_mean_offset = trial.imu.mean()
+    assert np.isclose(imu_filtered.mean(), raw_mean_offset, atol=0.1)
+
+    # When explicit mean subtraction drift correction is requested, offset is centered to ~0
+    drift_corrected = correct_drift_imu(trial.imu, method="mean_subtract")
+    assert np.isclose(drift_corrected.mean(), 0.0, atol=1e-6)
+
+
+def test_gyro_only_drift_correction():
+    # Shape: (8 sensors, 6 channels, 1000 samples)
+    imu = RNG.normal(size=(8, 6, 1000)) + 3.0
+    corrected = correct_drift_imu(imu, method="gyro_only")
+    # Accelerometer channels (0:3) retain mean ~3.0
+    assert np.isclose(corrected[:, 0:3, :].mean(), 3.0, atol=0.2)
+    # Gyro channels (3:6) are highpass-filtered around 0.0
+    assert np.isclose(corrected[:, 3:6, :].mean(), 0.0, atol=0.2)
+
+
+def test_windowing_and_sample_counts():
+    imu_win_samp, imu_step_samp, emg_win_samp, emg_step_samp = calculate_window_sample_counts(
+        window_ms=200.0, overlap=0.5
+    )
+    # 200 ms at ~148.15 Hz -> ~30 samples
+    assert imu_win_samp == 30
+    assert imu_step_samp == 15
+    # 200 ms at ~1259.26 Hz -> ~252 samples
+    assert emg_win_samp == 252
+    assert emg_step_samp == 126
+
+
+def test_windowing_slices_and_metadata_alignment(tmp_path):
+    _build_fake_dataset(tmp_path)
+    manifest = build_manifest(tmp_path)
+    row = manifest[(manifest["subject_id"] == 1) & (manifest["label_id"] == 0)].iloc[0]
+    trial = load_trial_from_manifest_row(row)
+
+    windowed_trial = slice_trial_windows(
+        trial=trial,
+        window_ms=200.0,
+        overlap=0.5,
+        preprocess=True,
+        execution=row["execution"],
+        exercise=row["exercise"],
+    )
+
+    assert windowed_trial.n_windows > 0
+    assert windowed_trial.imu_windows.shape == (
+        windowed_trial.n_windows,
+        config.N_SENSORS,
+        config.IMU_CHANNELS_PER_SENSOR,
+        30,
+    )
+    assert windowed_trial.emg_windows.shape == (
+        windowed_trial.n_windows,
+        config.N_SENSORS,
+        252,
+    )
+    assert len(windowed_trial.metadata) == windowed_trial.n_windows
+    assert list(windowed_trial.metadata.columns) == [
+        "window_index",
+        "start_time_s",
+        "end_time_s",
+        "subject_id",
+        "label_id",
+        "trial_num",
+        "execution",
+        "exercise",
+    ]
+    # Check start / end duration
+    first_row = windowed_trial.metadata.iloc[0]
+    assert first_row["start_time_s"] == 0.0
+    assert first_row["end_time_s"] == pytest.approx(0.200)
+
+
+def test_multimodal_window_synchronization_drift():
+    # 9.72s trial (1440 IMU samples, 12237 EMG samples)
+    imu_raw = np.zeros((config.N_SENSORS, config.IMU_CHANNELS_PER_SENSOR, 1440))
+    emg_raw = np.zeros((config.N_SENSORS, 12237))
+
+    imu_wins, emg_wins, start_times, _ = slice_arrays_to_windows(
+        imu=imu_raw,
+        emg=emg_raw,
+        window_ms=200.0,
+        overlap=0.5,
+    )
+
+    n_wins = len(start_times)
+    assert n_wins > 90
+
+    step_sec = 0.200 * (1.0 - 0.5)
+    for k in range(n_wins):
+        nominal_t = start_times[k]
+        assert nominal_t == pytest.approx(k * step_sec)
+
+        # Derived actual start times from sample indices
+        imu_sample_idx = int(round(nominal_t * config.IMU_SAMPLING_RATE_HZ))
+        emg_sample_idx = int(round(nominal_t * config.EMG_SAMPLING_RATE_HZ))
+
+        actual_imu_t = imu_sample_idx / config.IMU_SAMPLING_RATE_HZ
+        actual_emg_t = emg_sample_idx / config.EMG_SAMPLING_RATE_HZ
+
+        # Timing offset from nominal must stay within sub-sample tolerance (< 4 ms)
+        assert abs(actual_imu_t - nominal_t) < (0.5 / config.IMU_SAMPLING_RATE_HZ + 1e-6)
+        assert abs(actual_emg_t - nominal_t) < (0.5 / config.EMG_SAMPLING_RATE_HZ + 1e-6)
+
+        # Relative desynchronization between IMU and EMG must never accumulate or exceed ~4 ms
+        modality_offset_ms = abs(actual_imu_t - actual_emg_t) * 1000.0
+        assert modality_offset_ms < 4.0
+
+
+def test_feature_extraction_produces_valid_matrix(tmp_path):
+    _build_fake_dataset(tmp_path)
+    manifest = build_manifest(tmp_path)
+
+    # 1. Test single trial feature extraction
+    row = manifest.iloc[0]
+    trial = load_trial_from_manifest_row(row)
+    windowed = slice_trial_windows(trial, window_ms=200.0, overlap=0.5, execution="Correct", exercise="Squat")
+    trial_feats_df = extract_trial_features(windowed)
+
+    assert not trial_feats_df.empty
+    assert len(trial_feats_df) == windowed.n_windows
+    # Check that ROM, jerk, peak angular velocity, RMS, and EMG stats exist
+    assert "s1_acc_x_rom" in trial_feats_df.columns
+    assert "s1_acc_x_jerk" in trial_feats_df.columns
+    assert "s1_gyro_peak_angular_vel" in trial_feats_df.columns
+    assert "s1_emg_mav" in trial_feats_df.columns
+    assert "s1_emg_wl" in trial_feats_df.columns
+    assert np.all(np.isfinite(trial_feats_df.select_dtypes(include=[np.number]).values))
+
+    # 2. Test full manifest aggregation
+    full_matrix_df = build_feature_matrix(manifest, window_ms=200.0, overlap=0.5)
+    assert len(full_matrix_df) > len(trial_feats_df)
+    assert "subject_id" in full_matrix_df.columns
+    assert "label_id" in full_matrix_df.columns
 
 
 def test_load_trial_raises_on_duration_mismatch(tmp_path):
