@@ -8,6 +8,7 @@ metadata for tabular Feature Extraction (Random Forest/XGBoost).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -17,6 +18,8 @@ import pandas as pd
 from src import config
 from src.ingestion.ingest import Trial, load_trial_from_manifest_row
 from src.preprocessing.filters import preprocess_emg, preprocess_imu
+
+logger = logging.getLogger("trustknee.windowing")
 
 
 @dataclass
@@ -197,10 +200,24 @@ def generate_windows_from_manifest(
     window_ms: float = config.WINDOW_MS,
     overlap: float = config.WINDOW_OVERLAP,
     preprocess: bool = True,
+    skip_corrupt: bool = True,
 ) -> Iterator[WindowedTrial]:
     """Yield WindowedTrial objects one-by-one from a build_manifest() DataFrame."""
     for _, row in manifest.iterrows():
-        trial = load_trial_from_manifest_row(row)
+        try:
+            trial = load_trial_from_manifest_row(row)
+        except ValueError as e:
+            if skip_corrupt:
+                logger.warning(
+                    "Skipping trial (subject=%s, label=%s, trial=%s): %s",
+                    row.get("subject_id"),
+                    row.get("label_id"),
+                    row.get("trial_num"),
+                    e,
+                )
+                continue
+            raise
+
         yield slice_trial_windows(
             trial=trial,
             window_ms=window_ms,

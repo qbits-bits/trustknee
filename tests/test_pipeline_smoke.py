@@ -17,6 +17,7 @@ from src.ingestion import build_manifest, load_trial, load_trial_from_manifest_r
 from src.preprocessing import (
     calculate_window_sample_counts,
     correct_drift_imu,
+    generate_windows_from_manifest,
     preprocess_emg,
     preprocess_imu,
     slice_arrays_to_windows,
@@ -290,3 +291,37 @@ def test_correct_drift_imu_unknown_method_raises():
     imu = RNG.normal(size=(8, 6, 100))
     with pytest.raises(ValueError, match="Unknown drift correction method"):
         correct_drift_imu(imu, method="bogus")
+
+
+def test_load_trial_raises_on_empty_signal(tmp_path):
+    trial_dir = tmp_path / "empty_trial"
+    trial_dir.mkdir()
+    np.save(trial_dir / "imu.npy", np.empty((48, 0), dtype=float))
+    np.save(trial_dir / "emg.npy", np.empty((8, 0), dtype=float))
+
+    with pytest.raises(ValueError, match="Empty signal in trial"):
+        load_trial(
+            trial_dir / "imu.npy", trial_dir / "emg.npy", subject_id=18, label_id=6, trial_num=1
+        )
+
+
+def test_generate_windows_from_manifest_skips_empty_trials(tmp_path):
+    _build_fake_dataset(tmp_path)
+    manifest = build_manifest(tmp_path)
+
+    # Insert a corrupt/empty trial row
+    corrupt_dir = tmp_path / "dataset" / "Subject_1" / "0" / "Trial_999"
+    corrupt_dir.mkdir(parents=True)
+    np.save(corrupt_dir / "imu.npy", np.empty((48, 0), dtype=float))
+    np.save(corrupt_dir / "emg.npy", np.empty((8, 0), dtype=float))
+
+    corrupt_row = manifest.iloc[0].copy()
+    corrupt_row["trial_num"] = 999
+    corrupt_row["imu_path"] = corrupt_dir / "imu.npy"
+    corrupt_row["emg_path"] = corrupt_dir / "emg.npy"
+
+    manifest_with_corrupt = pd.concat([manifest, pd.DataFrame([corrupt_row])], ignore_index=True)
+
+    # Calling with skip_corrupt=True yields valid trials without exception
+    windows = list(generate_windows_from_manifest(manifest_with_corrupt, skip_corrupt=True))
+    assert len(windows) == len(manifest)

@@ -77,6 +77,12 @@ def load_trial(
     imu_raw = np.load(imu_path)
     emg_raw = np.load(emg_path)
 
+    if imu_raw.size == 0 or emg_raw.size == 0 or imu_raw.shape[-1] == 0 or emg_raw.shape[-1] == 0:
+        raise ValueError(
+            f"Empty signal in trial subject={subject_id} label={label_id} trial={trial_num}: "
+            f"imu shape={imu_raw.shape}, emg shape={emg_raw.shape}"
+        )
+
     expected_imu_rows = config.N_SENSORS * config.IMU_CHANNELS_PER_SENSOR
     if imu_raw.shape[0] != expected_imu_rows:
         raise ValueError(
