@@ -108,7 +108,7 @@ def extract_imu_window_features(
             features[f"{prefix}_range_of_motion_x"],
             features[f"{prefix}_range_of_motion_y"],
             features[f"{prefix}_range_of_motion_z"],
-        ) = compute_range_of_motion(gyro_block)
+        ) = compute_range_of_motion(gyro_block, fs=fs)
 
     return features
 
