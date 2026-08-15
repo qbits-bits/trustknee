@@ -6,9 +6,9 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src import config
-from src.features.extract import build_feature_matrix  # Functions from extract.py
-from src.ingestion import build_manifest
+from src import config  # noqa: E402
+from src.features.extract import build_feature_matrix  # noqa: E402
+from src.ingestion import build_manifest  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("trustknee.features")
