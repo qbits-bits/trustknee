@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.integrate import cumulative_trapezoid, trapezoid
+from scipy.signal import welch
 
 from src import config
 from src.preprocessing.windowing import WindowedTrial, generate_windows_from_manifest
@@ -28,11 +30,43 @@ def compute_jerk(accel: np.ndarray, fs: float = config.IMU_SAMPLING_RATE_HZ) -> 
     return float(np.sqrt(np.mean(jerk**2)))
 
 
+def compute_range_of_motion(gyro: np.ndarray, fs: float = config.IMU_SAMPLING_RATE_HZ):
+    """Range of motion (integral of angular velocity over time)."""
+    if gyro.shape[-1] < 2:
+        return 0.0, 0.0, 0.0
+    dt = 1.0 / fs
+    angle = cumulative_trapezoid(gyro, dx=dt, axis=1, initial=0)  # replace rect. w/ trapezoid
+    range_of_motion = np.ptp(angle, axis=1)
+    return float(range_of_motion[0]), float(range_of_motion[1]), float(range_of_motion[2])
+
+
 def compute_waveform_length(emg: np.ndarray) -> float:
     """Waveform length (cumulative absolute amplitude change)."""
     if emg.shape[-1] < 2:
         return 0.0
     return float(np.sum(np.abs(np.diff(emg, axis=-1))))
+
+
+def compute_spectral_density(emg: np.ndarray) -> float:
+    """Total Spectral Power of an EMG signal (Welch's method)."""
+    if emg.shape[-1] < 2:
+        return 0.0
+    # Ensure nperseg doesn't exceed signal length
+    nperseg = min(emg.shape[-1], 128)
+    freq, psd = welch(emg, fs=config.EMG_SAMPLING_RATE_HZ, nperseg=nperseg)
+    return float(trapezoid(psd, freq))
+
+
+def compute_mnf(emg: np.ndarray) -> float:
+    """Mean Frequency (MNF / MPF) of an EMG signal."""
+    if emg.shape[-1] < 2:
+        return 0.0
+    nperseg = min(emg.shape[-1], 128)
+    freq, psd = welch(emg, fs=config.EMG_SAMPLING_RATE_HZ, nperseg=nperseg)
+    # Weighted average of frequencies (MNF formula)
+    return float(
+        np.sum(freq * psd) / (np.sum(psd) + 1e-8)
+    )  # added 1e-8, to avoid arithematic error
 
 
 def extract_imu_window_features(
@@ -60,13 +94,21 @@ def extract_imu_window_features(
                 features[f"{prefix}_{ch_name}_jerk"] = compute_jerk(sig, fs=fs)
 
         # Multi-axis kinematic composites
-        acc_mag = np.sqrt(np.sum(imu_win[s_idx, 0:3, :] ** 2, axis=0))
-        gyro_mag = np.sqrt(np.sum(imu_win[s_idx, 3:6, :] ** 2, axis=0))
+        acc_mag = np.linalg.norm(imu_win[s_idx, 0:3, :], axis=0)
+        gyro_mag = np.linalg.norm(imu_win[s_idx, 3:6, :], axis=0)
 
         features[f"{prefix}_acc_mag_mean"] = float(np.mean(acc_mag))
         features[f"{prefix}_acc_mag_peak"] = float(np.max(acc_mag))
         features[f"{prefix}_gyro_peak_angular_vel"] = float(np.max(gyro_mag))
-        features[f"{prefix}_gyro_mag_mean"] = float(np.mean(gyro_mag))
+        features[f"{prefix}_gyro_angular_vel_mean"] = float(np.mean(gyro_mag))
+
+        # 3. Integrated Range of Motion features, defines the extension angle of limb
+        gyro_block = imu_win[s_idx, 3:6, :]  # gyro channels (3, T_imu)
+        (
+            features[f"{prefix}_range_of_motion_x"],
+            features[f"{prefix}_range_of_motion_y"],
+            features[f"{prefix}_range_of_motion_z"],
+        ) = compute_range_of_motion(gyro_block)
 
     return features
 
@@ -88,6 +130,8 @@ def extract_emg_window_features(
         features[f"{prefix}_iemg"] = float(np.sum(np.abs(sig)))  # Integrated EMG
         features[f"{prefix}_wl"] = compute_waveform_length(sig)  # Waveform Length
         features[f"{prefix}_power"] = float(np.mean(sig**2))
+        features[f"{prefix}_spectral_power"] = compute_spectral_density(sig)
+        features[f"{prefix}_mnf"] = compute_mnf(sig)  # Mean Frequency
 
     return features
 

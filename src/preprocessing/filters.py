@@ -51,7 +51,7 @@ def correct_drift_imu(
     method="mean_subtract" (default): per-channel mean subtraction.
     method="highpass": high-pass at config.FILTERS.imu_drift_highpass_hz across all channels.
     method="gyro_only": high-pass at config.FILTERS.imu_drift_highpass_hz ONLY on gyroscope channels,
-                       preserving the 1g DC gravity vector on accelerometer channels.
+    preserving the 1g DC gravity vector on accelerometer channels.
     """
     if method == "highpass":
         return _butter_filtfilt(
