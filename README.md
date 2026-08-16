@@ -76,7 +76,8 @@ not commit participant data to Git.
 
 ## Install the project
 
-Python 3.10 or newer is required. From the project folder, run:
+Python 3.12 or newer is required because of the pinned package versions. From
+the project folder, run:
 
 ```bash
 bash setup.sh
