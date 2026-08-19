@@ -15,6 +15,11 @@ from pathlib import Path
 # data_root argument, not by editing this default.
 DEFAULT_DATA_ROOT = Path("/content/drive/MyDrive/Data")
 
+# Subject IDs held out for Leave-One-Subject-Out (LOSO) evaluation. Enforced in
+# build_manifest, not by deleting folders on disk, so re-syncing the dataset
+# from Drive cannot silently reintroduce these subjects into training.
+HELD_OUT_LOSO_SUBJECTS = {1}
+
 # Sensor hardware constants, confirmed against the KneE-PAD data descriptor.
 N_SENSORS = 8
 EMG_CHANNELS_PER_SENSOR = 1
