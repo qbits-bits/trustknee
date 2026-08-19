@@ -98,7 +98,8 @@ def test_duration_alignment_matches_expected():
 def test_manifest_and_pipeline_end_to_end(tmp_path):
     _build_fake_dataset(tmp_path)
 
-    manifest = build_manifest(tmp_path)
+    # exclude_subjects=set() includes every subject, preserving pre-LOSO behavior.
+    manifest = build_manifest(tmp_path, exclude_subjects=set())
     assert len(manifest) == 3
     assert set(manifest["subject_id"]) == {1, 2}
     assert set(manifest["label_id"]) == {0, 3}
@@ -171,7 +172,7 @@ def test_windowing_and_sample_counts():
 
 def test_windowing_slices_and_metadata_alignment(tmp_path):
     _build_fake_dataset(tmp_path)
-    manifest = build_manifest(tmp_path)
+    manifest = build_manifest(tmp_path, exclude_subjects=set())
     row = manifest[(manifest["subject_id"] == 1) & (manifest["label_id"] == 0)].iloc[0]
     trial = load_trial_from_manifest_row(row)
 
@@ -251,7 +252,7 @@ def test_multimodal_window_synchronization_drift():
 
 def test_feature_extraction_produces_valid_matrix(tmp_path):
     _build_fake_dataset(tmp_path)
-    manifest = build_manifest(tmp_path)
+    manifest = build_manifest(tmp_path, exclude_subjects=set())
 
     # 1. Test single trial feature extraction
     row = manifest.iloc[0]
@@ -307,7 +308,7 @@ def test_load_trial_raises_on_empty_signal(tmp_path):
 
 def test_generate_windows_from_manifest_skips_empty_trials(tmp_path):
     _build_fake_dataset(tmp_path)
-    manifest = build_manifest(tmp_path)
+    manifest = build_manifest(tmp_path, exclude_subjects=set())
 
     # Insert a corrupt/empty trial row
     corrupt_dir = tmp_path / "dataset" / "Subject_1" / "0" / "Trial_999"
@@ -325,3 +326,31 @@ def test_generate_windows_from_manifest_skips_empty_trials(tmp_path):
     # Calling with skip_corrupt=True yields valid trials without exception
     windows = list(generate_windows_from_manifest(manifest_with_corrupt, skip_corrupt=True))
     assert len(windows) == len(manifest)
+
+
+def test_build_manifest_excludes_held_out_subject_by_default(tmp_path):
+    """Default build_manifest() must drop LOSO held-out subjects (Subject 1)."""
+    _build_fake_dataset(tmp_path)
+
+    manifest = build_manifest(tmp_path)
+    assert 1 not in manifest["subject_id"].unique()
+    # Subject 2 is not held out, so its trials survive.
+    assert set(manifest["subject_id"].unique()) == {2}
+    assert len(manifest) == 1
+
+
+def test_build_manifest_exclude_override_includes_all_subjects(tmp_path):
+    """exclude_subjects=set() overrides the hold-out, needed for final LOSO eval."""
+    _build_fake_dataset(tmp_path)
+
+    manifest = build_manifest(tmp_path, exclude_subjects=set())
+    assert set(manifest["subject_id"].unique()) == {1, 2}
+    assert len(manifest) == 3
+
+
+def test_build_manifest_raises_when_all_subjects_excluded(tmp_path):
+    """Excluding every available subject must fail loud, not yield an empty manifest."""
+    _build_fake_dataset(tmp_path)
+
+    with pytest.raises(RuntimeError, match="No trials remain under"):
+        build_manifest(tmp_path, exclude_subjects={1, 2})

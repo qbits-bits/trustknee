@@ -128,8 +128,18 @@ def load_trial_from_manifest_row(row) -> Trial:
     )
 
 
-def build_manifest(data_root: Path | str) -> pd.DataFrame:
-    """Walk <data_root>/dataset/Subject_*/<label_id>/Trial_*/ and build a trial manifest."""
+def build_manifest(
+    data_root: Path | str,
+    exclude_subjects: set[int] | None = None,
+) -> pd.DataFrame:
+    """Walk <data_root>/dataset/Subject_*/<label_id>/Trial_*/ and build a trial manifest.
+
+    Subjects in exclude_subjects are dropped from the returned manifest. Defaults
+    to config.HELD_OUT_LOSO_SUBJECTS so Subject 1 is held out for LOSO evaluation;
+    pass exclude_subjects=set() to include every subject (e.g. for final eval).
+    """
+    if exclude_subjects is None:
+        exclude_subjects = config.HELD_OUT_LOSO_SUBJECTS
     data_root = Path(data_root)
     dataset_dir = data_root / "dataset"
     if not dataset_dir.is_dir():
@@ -206,4 +216,23 @@ def build_manifest(data_root: Path | str) -> pd.DataFrame:
     if not rows:
         raise RuntimeError(f"No trials found under {dataset_dir}")
 
-    return pd.DataFrame(rows)
+    manifest = pd.DataFrame(rows)
+
+    if exclude_subjects:
+        n_before = len(manifest)
+        manifest = manifest[~manifest["subject_id"].isin(exclude_subjects)].reset_index(drop=True)
+        if manifest.empty:
+            raise RuntimeError(
+                f"No trials remain under {dataset_dir} after excluding subjects "
+                f"{sorted(exclude_subjects)}"
+            )
+        logger.info(
+            "Excluded LOSO held-out subjects %s from manifest: dropped %d trials.",
+            sorted(exclude_subjects),
+            n_before - len(manifest),
+        )
+
+    leaked = set(exclude_subjects) & set(manifest["subject_id"].unique())
+    assert not leaked, f"Held-out subjects {sorted(leaked)} present in manifest after exclusion"
+
+    return manifest
