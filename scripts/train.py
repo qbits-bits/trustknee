@@ -84,7 +84,7 @@ def pipeline(
         # outputs = model(signals)
 
         print(f"Batch signals shape: {signals.shape} | Labels shape: {labels.shape}")
-        return train_loader, val_loader, train_loader
+        return train_loader, val_loader, test_loader
 
 
 if __name__ == "__main__":
