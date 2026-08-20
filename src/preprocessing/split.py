@@ -7,8 +7,8 @@ def train_val_test_split(data, on="subject_id"):
     """Split rows into reproducible train, validation, and test partitions.
 
     Splitting is performed on unique subject IDs so windows from one subject
-    cannot appear in more than one partition. The proportions are 70%, 15%,
-    and 15% of the subjects, respectively.
+    cannot appear in more than one partition. The target proportions are
+    70%, 15%, and 15% of subjects, with safeguards for small datasets.
 
     Args:
         data: A pandas DataFrame containing the grouping column.
@@ -17,14 +17,27 @@ def train_val_test_split(data, on="subject_id"):
     Returns:
         Three DataFrames in train, validation, and test order.
     """
-    df = data
+    df = data.copy()
     subjects = df[on].unique()  # shuffle subject IDs;
-    np.random.seed(42)  # for reproducibility's sake;
-    np.random.shuffle(subjects)
 
-    # Defined ratios of 70(train), 15(val), 15(test);
-    train_end = int(0.70 * len(subjects))
-    val_end = int(0.85 * len(subjects))
+    n_subjects = len(subjects)
+    if n_subjects == 0:
+        raise ValueError(f"No unique subjects found in column '{on}'.")
+
+    rng = np.random.default_rng(42)  # for reproducibility's sake;
+    rng.shuffle(subjects)
+
+    # Calculate boundaries with minimum size guarantees;
+    if n_subjects < 3:
+        # Fallback for small datasets;
+        train_end = max(1, n_subjects - 2)
+        val_end = max(train_end + 1, n_subjects - 1)
+    else:
+        # Standard 70:15:15 proportional split;
+        train_end = max(1, int(0.70 * n_subjects))
+        val_end = max(train_end + 1, int(0.85 * n_subjects))
+
+        val_end = min(val_end, n_subjects - 1)
 
     train_subjects = subjects[:train_end]
     val_subjects = subjects[train_end:val_end]
