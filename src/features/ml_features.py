@@ -1,3 +1,5 @@
+"""Command-line entry point for building tabular TrustKnee features."""
+
 import logging
 import sys
 from pathlib import Path
@@ -14,7 +16,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("trustknee.features")
 
 
-def main():
+def fetch_stat_features() -> None:
+    """Build and save the processed KneE-PAD feature matrix.
+
+    The raw dataset is read from ``data/raw`` relative to the project root and
+    the resulting CSV is written to ``data/processed/kneepad_features.csv``.
+    """
     # 1. Defined paths dynamically based on project root
     # Pivoting 3 levels up from `src/features/build_features.py` reaches project root
     project_root = Path(__file__).resolve().parents[2]
@@ -45,4 +52,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    fetch_stat_features()
