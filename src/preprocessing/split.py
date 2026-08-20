@@ -30,8 +30,8 @@ def train_val_test_split(data, on="subject_id"):
     val_subjects = subjects[train_end:val_end]
     test_subjects = subjects[val_end:]
 
-    train = df[df["subject_id"].isin(train_subjects)].reset_index(drop=True)
-    val = df[df["subject_id"].isin(val_subjects)].reset_index(drop=True)
-    test = df[df["subject_id"].isin(test_subjects)].reset_index(drop=True)
+    train = df[df[on].isin(train_subjects)].reset_index(drop=True)
+    val = df[df[on].isin(val_subjects)].reset_index(drop=True)
+    test = df[df[on].isin(test_subjects)].reset_index(drop=True)
 
     return train, val, test
