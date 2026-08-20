@@ -29,11 +29,38 @@ from scipy.signal import butter, filtfilt, iirnotch
 from src import config
 
 
+def _filt_filt(b, a, data, axis=-1):
+    samples = data.shape[axis]
+    ntaps = max(len(a), len(b))  # for 4th order butterworth, number of taps are 9;
+    required_padlen = 3 * ntaps  # standard pad len, 27;
+
+    if samples <= 1:
+        return data
+
+    if samples <= required_padlen:
+        # Build pad_width for N-dimensional arrays (pads ONLY along target axis);
+        pad_width = [(0, 0)] * data.ndim
+        pad_width[axis] = (required_padlen, required_padlen)
+
+        # Reflect-pad boundaries so signal length safely exceeds required_padlen;
+        padded_data = np.pad(data, pad_width, mode="reflect")
+
+        # Run filtfilt on the padded array
+        filtered_padded = filtfilt(b, a, padded_data, axis=axis)
+
+        # Slice target axis back to original bounds: [required_padlen : required_padlen + samples];
+        slices = [slice(None)] * data.ndim
+        slices[axis] = slice(required_padlen, required_padlen + samples)
+        return filtered_padded[tuple(slices)]
+
+    return filtfilt(b, a, data, axis=axis)  # ample samples/time-steps;
+
+
 def _butter_filtfilt(data: np.ndarray, cutoff, fs: float, order: int, btype: str) -> np.ndarray:
     nyq = fs / 2.0
     wn = [c / nyq for c in cutoff] if btype == "bandpass" else cutoff / nyq
-    b, a = butter(order, wn, btype=btype)
-    return filtfilt(b, a, data, axis=-1)
+    b, a = butter(order, wn, btype=btype)  # type: ignore
+    return _filt_filt(b, a, data, axis=-1)
 
 
 def lowpass_imu(imu: np.ndarray, fs: float = config.IMU_SAMPLING_RATE_HZ) -> np.ndarray:
@@ -123,7 +150,7 @@ def bandpass_emg(emg: np.ndarray, fs: float = config.EMG_SAMPLING_RATE_HZ) -> np
 def notch_emg(emg: np.ndarray, fs: float = config.EMG_SAMPLING_RATE_HZ) -> np.ndarray:
     """Notch filter EMG data at config.FILTERS.emg_notch_hz to remove mains hum."""
     b, a = iirnotch(config.FILTERS.emg_notch_hz, config.FILTERS.emg_notch_q, fs=fs)
-    return filtfilt(b, a, emg, axis=-1)
+    return _filt_filt(b, a, emg, axis=-1)
 
 
 def preprocess_emg(emg: np.ndarray, fs: float = config.EMG_SAMPLING_RATE_HZ) -> np.ndarray:
