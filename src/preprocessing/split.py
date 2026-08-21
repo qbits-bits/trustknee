@@ -7,8 +7,8 @@ def train_val_test_split(data, on="subject_id"):
     """Split rows into reproducible train, validation, and test partitions.
 
     Splitting is performed on unique subject IDs so windows from one subject
-    cannot appear in more than one partition. The target proportions are
-    70%, 15%, and 15% of subjects, with safeguards for small datasets.
+    cannot appear in more than one partition. Target proportions are 70%, 15%,
+    and 15% with deterministic fallbacks for small subject counts.
 
     Args:
         data: A pandas DataFrame containing the grouping column.
@@ -27,17 +27,23 @@ def train_val_test_split(data, on="subject_id"):
     rng = np.random.default_rng(42)  # for reproducibility's sake;
     rng.shuffle(subjects)
 
-    # Calculate boundaries with minimum size guarantees;
-    if n_subjects < 3:
-        # Fallback for small datasets;
-        train_end = max(1, n_subjects - 2)
-        val_end = max(train_end + 1, n_subjects - 1)
+    # Handle small N explicitly to guarantee non-empty partitions;
+    if n_subjects == 1:
+        train_end, val_end = 1, 1  # val and test will be empty by necessity;
+    elif n_subjects == 2:
+        train_end, val_end = 1, 2  # 1 train, 1 val, 0 test;
+    elif n_subjects == 3:
+        train_end, val_end = 1, 2  # 1 train, 1 val, 1 test;
+    elif n_subjects == 4:
+        train_end, val_end = 2, 3  # 2 train, 1 val, 1 test;
     else:
-        # Standard 70:15:15 proportional split;
-        train_end = max(1, int(0.70 * n_subjects))
-        val_end = max(train_end + 1, int(0.85 * n_subjects))
+        # Standard 70:15:15 proportional split (n >= 5);
+        train_end = int(0.70 * n_subjects)
+        val_end = int(0.85 * n_subjects)
 
-        val_end = min(val_end, n_subjects - 1)
+        # Guarantee at least 1 subject in val and test;
+        train_end = min(train_end, n_subjects - 2)
+        val_end = max(train_end + 1, min(val_end, n_subjects - 1))
 
     train_subjects = subjects[:train_end]
     val_subjects = subjects[train_end:val_end]
