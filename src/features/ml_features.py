@@ -22,20 +22,20 @@ def fetch_stat_features() -> None:
     The raw dataset is read from ``data/raw`` relative to the project root and
     the resulting CSV is written to ``data/processed/kneepad_features.csv``.
     """
-    # 1. Defined paths dynamically based on project root
-    # Pivoting 3 levels up from `src/features/build_features.py` reaches project root
+    # Defined paths dynamically based on project root;
+    # Pivoting 3 levels up from `src/features/ml_features.py` reaches project root;
     project_root = Path(__file__).resolve().parents[2]
 
     raw_data_dir = project_root / "data" / "raw"
     output_dir = project_root / "data" / "processed"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. Ingested raw dataset
+    # Ingested raw dataset;
     logger.info("Scanning raw data under: %s", raw_data_dir)
     manifest = build_manifest(raw_data_dir)
     logger.info("Loaded manifest with %d trials.", len(manifest))
 
-    # 3. Process signals & compute features
+    # Process signals & compute features;
     logger.info("Extracting features (Window: %dms)...", config.WINDOW_MS)
     features_df = build_feature_matrix(
         manifest=manifest,
