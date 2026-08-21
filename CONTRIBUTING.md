@@ -44,7 +44,7 @@ The pre-commit config includes a branch guard that blocks direct commits to `mai
 After placing the dataset under `data/raw/`:
 
 ```bash
-python src/features/build_features.py
+python src/features/ml_features.py
 ```
 
 Output: `data/processed/kneepad_features.csv`

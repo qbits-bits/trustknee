@@ -72,7 +72,7 @@ bash setup.sh && source .venv/bin/activate
 pytest -q
 
 # Run feature extraction pipeline
-python src/features/build_features.py   # outputs data/processed/kneepad_features.csv
+python src/features/ml_features.py   # outputs data/processed/kneepad_features.csv
 ```
 
 ---
