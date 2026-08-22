@@ -2,7 +2,7 @@
 
 from torch.utils.data import DataLoader
 
-from src.wrapper.dataset_seq import SequenceDataset
+from src.wrapper.dataset_seq import SequenceDataset, dynamic_padding_collate
 
 
 def create_dataloaders(
@@ -21,9 +21,25 @@ def create_dataloaders(
     test_ds = SequenceDataset(X_test, y_test)
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=dynamic_padding_collate,
     )
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=dynamic_padding_collate,
+    )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=dynamic_padding_collate,
+    )
 
     return train_loader, val_loader, test_loader
