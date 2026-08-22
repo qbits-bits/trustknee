@@ -85,47 +85,18 @@ def combine_signals(
     return trial
 
 
-def normalize_signals(train, val, test):
+def normalize_signals(train_list, val_list, test_list):
     """Z-score signal splits using statistics calculated from training data.
 
     Returns normalized train, validation, and test arrays followed by the
     training mean and standard deviation used for all three transformations.
     """
-    # Compute Mean and STD, from the training set across (samples, time_steps);
-    mean = train.mean(axis=(0, 2), keepdims=True)  # Shape: (1, Channels, 1);
-    std = train.std(axis=(0, 2), keepdims=True) + 1e-8  # 1e-8 prevents division by zero;
+    train_concat = np.concatenate(train_list, axis=1)
+    global_mean = train_concat.mean(axis=-1, keepdims=True)
+    global_std = train_concat.std(axis=-1, keepdims=True)
 
-    # Normalize all three splits using TRAIN statistics;
-    train_norm = (train - mean) / std
-    val_norm = (val - mean) / std
-    test_norm = (test - mean) / std
+    train_norm = [(trial - global_mean) / (global_std + 1e-8) for trial in train_list]
+    val_norm = [(trial - global_mean) / (global_std + 1e-8) for trial in val_list]
+    test_norm = [(trial - global_mean) / (global_std + 1e-8) for trial in test_list]
 
-    return train_norm, val_norm, test_norm, mean, std
-
-
-def standardize_length(sequences, target_len=200):
-    """Truncate or zero-pad channel-first sequences to a common length.
-
-    Args:
-        sequences: Iterable of arrays shaped ``(channels, time)``.
-        target_len: Desired number of time steps.
-
-    Returns:
-        A NumPy array containing the standardized sequences.
-    """
-    standardized = []
-    for seq in sequences:
-        arr = np.array(seq)
-        # Assuming shape is (Channels, Time)
-        current_len = arr.shape[-1]
-
-        if current_len > target_len:
-            # Truncate
-            arr = arr[:, :target_len]
-        elif current_len < target_len:
-            # Zero-pad
-            pad_width = target_len - current_len
-            arr = np.pad(arr, ((0, 0), (0, pad_width)), mode="constant")
-
-        standardized.append(arr)
-    return np.array(standardized)
+    return train_norm, val_norm, test_norm, global_mean, global_std
