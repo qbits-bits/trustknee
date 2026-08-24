@@ -2,6 +2,11 @@ numpy==2.5.2
 pandas==3.0.5
 scipy==1.18.0
 matplotlib==3.11.1
+scikit-learn==1.6.1
+# The experiment is intentionally CPU-only and does not need CUDA runtime wheels.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cpu
+xgboost==1.7.6
 pytest==9.1.1
 ruff==0.9.6
 pre-commit==4.1.0
