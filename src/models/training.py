@@ -21,6 +21,7 @@ class TrainingConfig:
     patience: int = 5
     validation_batch_size: int = 256
     xgb_estimators: int = 120
+    xgb_n_jobs: int = -1
 
 
 QUICK_TRAINING = TrainingConfig(max_epochs=2, patience=1, xgb_estimators=20)
@@ -58,6 +59,8 @@ def fit_transformer(
     seed: int = 42,
     training_config: TrainingConfig | None = None,
     device: str = "cpu",
+    normalizer: SequenceNormalizer | None = None,
+    normalized_sequences: np.ndarray | None = None,
 ) -> tuple[Any, SequenceNormalizer, list[dict[str, float]]]:
     """Train the Transformer and select its state using validation macro-F1."""
     import torch
@@ -71,10 +74,17 @@ def fit_transformer(
     training_device = torch.device(device)
     if training_device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA training was requested, but CUDA is not available")
+    use_cuda = training_device.type == "cuda"
     train_indices = np.asarray(train_indices, dtype=int)
     validation_indices = np.asarray(validation_indices, dtype=int)
-    normalizer = fit_sequence_normalizer(sequences, train_indices)
-    normalized = normalizer.transform(sequences)
+    if normalizer is None:
+        normalizer = fit_sequence_normalizer(sequences, train_indices)
+    if normalized_sequences is None:
+        normalized = normalizer.transform(sequences)
+    else:
+        normalized = np.asarray(normalized_sequences, dtype=np.float32)
+        if normalized.shape != np.asarray(sequences).shape:
+            raise ValueError("normalized_sequences must match the input sequence shape")
     x_train = torch.from_numpy(normalized[train_indices])
     y_train = torch.from_numpy(np.asarray(labels, dtype=np.int64)[train_indices])
     generator = torch.Generator().manual_seed(seed)
@@ -83,6 +93,7 @@ def fit_transformer(
         batch_size=cfg.batch_size,
         shuffle=True,
         generator=generator,
+        pin_memory=use_cuda,
     )
     model = TransformerEncoderClassifier(num_classes=num_classes).to(training_device)
     class_weights = torch.from_numpy(_class_weights(y_train.numpy(), num_classes)).to(
@@ -99,15 +110,19 @@ def fit_transformer(
     history: list[dict[str, float]] = []
     for epoch in range(cfg.max_epochs):
         model.train()
-        losses = []
+        loss_sum = torch.zeros((), device=training_device)
+        batch_count = 0
         for batch_x, batch_y in loader:
-            batch_x = batch_x.to(training_device)
-            batch_y = batch_y.to(training_device)
-            optimizer.zero_grad()
+            batch_x = batch_x.to(training_device, non_blocking=use_cuda)
+            batch_y = batch_y.to(training_device, non_blocking=use_cuda)
+            optimizer.zero_grad(set_to_none=True)
             loss = loss_function(model(batch_x), batch_y)
             loss.backward()
             optimizer.step()
-            losses.append(float(loss.detach().cpu()))
+            loss_sum += loss.detach()
+            batch_count += 1
+
+        mean_loss = float((loss_sum / batch_count).item()) if batch_count else float("nan")
 
         model.eval()
         with torch.no_grad():
@@ -126,10 +141,8 @@ def fit_transformer(
             else:
                 # With a single training participant there is no independent
                 # subject available for inner validation; retain the first state.
-                score = -float(np.mean(losses)) if losses else -np.inf
-        history.append(
-            {"epoch": float(epoch + 1), "loss": float(np.mean(losses)), "val_macro_f1": score}
-        )
+                score = -mean_loss if batch_count else -np.inf
+        history.append({"epoch": float(epoch + 1), "loss": mean_loss, "val_macro_f1": score})
         if score > best_score:
             best_score = score
             best_state = copy.deepcopy(model.state_dict())
@@ -153,15 +166,21 @@ def predict_transformer(
 
     values = normalizer.transform(sequences)
     loader = DataLoader(
-        TensorDataset(torch.from_numpy(values)), batch_size=batch_size, shuffle=False
+        TensorDataset(torch.from_numpy(values)),
+        batch_size=batch_size,
+        shuffle=False,
+        pin_memory=next(model.parameters()).device.type == "cuda",
     )
     probabilities = []
     model.eval()
+    model_device = next(model.parameters()).device
+    use_cuda = model_device.type == "cuda"
     with torch.no_grad():
         for (batch_x,) in loader:
-            model_device = next(model.parameters()).device
             probabilities.append(
-                torch.softmax(model(batch_x.to(model_device)), dim=1).cpu().numpy()
+                torch.softmax(model(batch_x.to(model_device, non_blocking=use_cuda)), dim=1)
+                .cpu()
+                .numpy()
             )
     if not probabilities:
         return np.empty((0, model.classifier.out_features), dtype=np.float32)
@@ -235,7 +254,7 @@ def fit_xgboost(
         "objective": "multi:softprob" if local_num_classes > 2 else "binary:logistic",
         "eval_metric": "mlogloss" if local_num_classes > 2 else "logloss",
         "random_state": seed,
-        "n_jobs": 1,
+        "n_jobs": cfg.xgb_n_jobs,
         "tree_method": "hist",
     }
     if local_num_classes > 2:

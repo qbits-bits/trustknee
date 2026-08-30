@@ -139,6 +139,7 @@ def test_xgboost_maps_sparse_training_classes_to_global_probabilities():
     assert probabilities.shape == (len(features), 9)
     assert np.allclose(probabilities.sum(axis=1), 1.0)
     assert np.all(probabilities[:, [1, 3, 4, 5, 6, 7]] == 0.0)
+    assert model.estimator.get_params()["n_jobs"] == -1
 
 
 def _write_model_dataset(data_root):
@@ -194,6 +195,18 @@ def test_quick_end_to_end_writes_loso_results(tmp_path):
     for filename in ["fold_results.csv", "summary_results.csv", "config.json"]:
         assert (tmp_path / "reports" / filename).exists()
 
+    resumed = run_loso_comparison(
+        build_manifest(tmp_path, exclude_subjects=set()),
+        tmp_path / "reports",
+        quick=True,
+        resume=True,
+    )
+    pd.testing.assert_frame_equal(
+        results.sort_values(["fold", "model", "task", "level"]).reset_index(drop=True),
+        resumed.sort_values(["fold", "model", "task", "level"]).reset_index(drop=True),
+        check_dtype=False,
+    )
+
 
 def test_evaluate_cli_parser_defaults():
     from src.models.evaluate import build_parser
@@ -202,6 +215,8 @@ def test_evaluate_cli_parser_defaults():
     args = parser.parse_args(["--data-root", "data", "--output-dir", "out"])
     assert not args.include_held_out
     assert not args.quick
+    assert not args.resume
+    assert args.batch_size is None
     assert args.seed == 42
 
     args_held = parser.parse_args(

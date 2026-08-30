@@ -7,6 +7,7 @@ import logging
 import platform
 import warnings
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ from sklearn.metrics import (
 
 from src import config as project_config
 from src.models.model_data import ModelDataset, build_model_inputs
+from src.models.normalization import normalize_sequences
 from src.models.training import (
     QUICK_TRAINING,
     TrainingConfig,
@@ -30,6 +32,8 @@ from src.models.training import (
 )
 
 logger = logging.getLogger("trustknee.models")
+
+EXPECTED_FOLD_RESULT_ROWS = 3 * 2 * 2  # models × tasks × reporting levels
 
 
 def iter_loso_folds(metadata: pd.DataFrame) -> Iterator[tuple[int, np.ndarray, np.ndarray]]:
@@ -319,12 +323,100 @@ clinical safety, diagnostic validity, or readiness for home use.
     (output_dir / "experiment_record.md").write_text(record, encoding="utf-8")
 
 
+def _summarize_results(fold_results: pd.DataFrame) -> pd.DataFrame:
+    summary = (
+        fold_results.groupby(["model", "task", "level"])[
+            ["accuracy", "macro_f1", "balanced_accuracy"]
+        ]
+        .agg(["mean", "std"])
+        .reset_index()
+    )
+    summary.columns = [
+        "model",
+        "task",
+        "level",
+        "accuracy_mean",
+        "accuracy_std",
+        "macro_f1_mean",
+        "macro_f1_std",
+        "balanced_accuracy_mean",
+        "balanced_accuracy_std",
+    ]
+    return summary.fillna(0.0)
+
+
+def _atomic_write_csv(frame: pd.DataFrame, path: Path) -> None:
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    frame.to_csv(temporary_path, index=False)
+    temporary_path.replace(path)
+
+
+def _write_result_checkpoint(
+    output_dir: Path,
+    rows: list[dict[str, object]],
+    per_class_rows: list[dict[str, object]],
+    confusion_rows: list[dict[str, object]],
+) -> pd.DataFrame:
+    fold_results = pd.DataFrame(rows)
+    per_class_results = pd.DataFrame(per_class_rows)
+    confusion_results = pd.DataFrame(confusion_rows)
+    _atomic_write_csv(per_class_results, output_dir / "per_class_results.csv")
+    _atomic_write_csv(confusion_results, output_dir / "confusion_matrices.csv")
+    for (model, task), group in confusion_results.groupby(["model", "task"]):
+        _atomic_write_csv(group, output_dir / f"confusion_matrices_{model}_{task}.csv")
+    _atomic_write_csv(_summarize_results(fold_results), output_dir / "summary_results.csv")
+    # Write this completion marker last. Resume trusts only folds recorded here.
+    _atomic_write_csv(fold_results, output_dir / "fold_results.csv")
+    return fold_results
+
+
+def _load_result_checkpoint(
+    output_dir: Path, resume: bool
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    set[int],
+]:
+    if not resume:
+        return [], [], [], set()
+    paths = {
+        "fold": output_dir / "fold_results.csv",
+        "per_class": output_dir / "per_class_results.csv",
+        "confusion": output_dir / "confusion_matrices.csv",
+    }
+    existing = {name: path.exists() for name, path in paths.items()}
+    if not any(existing.values()):
+        return [], [], [], set()
+    if not all(existing.values()):
+        raise ValueError("Resume requires a complete set of fold checkpoint files")
+
+    fold_results = pd.read_csv(paths["fold"])
+    counts = fold_results.groupby("fold").size()
+    incomplete = counts[counts != EXPECTED_FOLD_RESULT_ROWS]
+    if not incomplete.empty:
+        raise ValueError(f"Incomplete fold checkpoint rows: {incomplete.to_dict()}")
+    completed_folds = {int(fold) for fold in counts.index}
+    per_class_results = pd.read_csv(paths["per_class"])
+    confusion_results = pd.read_csv(paths["confusion"])
+    per_class_results = per_class_results[per_class_results["fold"].isin(completed_folds)]
+    confusion_results = confusion_results[confusion_results["fold"].isin(completed_folds)]
+    return (
+        fold_results.to_dict("records"),
+        per_class_results.to_dict("records"),
+        confusion_results.to_dict("records"),
+        completed_folds,
+    )
+
+
 def run_loso_comparison(
     manifest: pd.DataFrame,
     output_dir: Path,
     seed: int = 42,
     quick: bool = False,
     device: str = "cpu",
+    resume: bool = False,
+    batch_size: int | None = None,
 ) -> pd.DataFrame:
     """Run binary and nine-class LOSO comparisons and write reproducible results."""
     output_dir = Path(output_dir)
@@ -335,6 +427,10 @@ def run_loso_comparison(
     if dataset.metadata["subject_id"].nunique() < 2:
         raise ValueError("LOSO evaluation requires at least two subjects")
     training_config = QUICK_TRAINING if quick else TrainingConfig()
+    if batch_size is not None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        training_config = replace(training_config, batch_size=batch_size)
 
     config_record = {
         "seed": seed,
@@ -347,6 +443,8 @@ def run_loso_comparison(
         "primary_task": "binary",
         "secondary_task": "nine_class",
         "evaluation": "leave_one_subject_out",
+        "subjects": [int(value) for value in sorted(dataset.metadata["subject_id"].unique())],
+        "n_windows": dataset.n_samples,
         "transformer": {
             "input_dim": 56,
             "d_model": 64,
@@ -366,22 +464,37 @@ def run_loso_comparison(
             "max_depth": 4,
             "learning_rate": 0.05,
             "seed": seed,
+            "n_jobs": training_config.xgb_n_jobs,
         },
     }
-    (output_dir / "config.json").write_text(json.dumps(config_record, indent=2), encoding="utf-8")
+    config_path = output_dir / "config.json"
+    if resume and config_path.exists():
+        existing_config = json.loads(config_path.read_text(encoding="utf-8"))
+        if existing_config != config_record:
+            raise ValueError("Existing checkpoint configuration does not match this run")
+    else:
+        config_path.write_text(json.dumps(config_record, indent=2), encoding="utf-8")
     _write_experiment_record(output_dir, dataset, manifest, seed, quick, training_config, device)
 
-    all_rows: list[dict[str, object]] = []
-    all_per_class: list[dict[str, object]] = []
-    all_confusion: list[dict[str, object]] = []
+    all_rows, all_per_class, all_confusion, completed_folds = _load_result_checkpoint(
+        output_dir, resume
+    )
     task_labels = {"binary": dataset.labels_binary, "nine_class": dataset.labels_9}
     task_classes = {"binary": 2, "nine_class": 9}
 
     for fold, (held_out, train_indices, test_indices) in enumerate(
         iter_loso_folds(dataset.metadata), start=1
     ):
+        if fold in completed_folds:
+            logger.info(
+                "Fold %d already complete; resuming after held-out subject %s", fold, held_out
+            )
+            continue
         fit_indices, validation_indices = subject_validation_split(
             dataset.metadata, train_indices, seed=seed + fold
+        )
+        normalized_sequences, sequence_normalizer = normalize_sequences(
+            dataset.transformer_sequences, fit_indices
         )
         logger.info(
             "Fold %d/%d: held-out subject %s (%d test windows)",
@@ -421,6 +534,8 @@ def run_loso_comparison(
                 seed=seed + fold,
                 training_config=training_config,
                 device=device,
+                normalizer=sequence_normalizer,
+                normalized_sequences=normalized_sequences,
             )
             transformer_probabilities = predict_transformer(
                 transformer, dataset.transformer_sequences[test_indices], normalizer
@@ -470,33 +585,6 @@ def run_loso_comparison(
             all_per_class.extend(xgb_classes)
             all_confusion.extend(xgb_confusion)
 
-    fold_results = pd.DataFrame(all_rows)
-    per_class_results = pd.DataFrame(all_per_class)
-    confusion_results = pd.DataFrame(all_confusion)
-    fold_results.to_csv(output_dir / "fold_results.csv", index=False)
-    per_class_results.to_csv(output_dir / "per_class_results.csv", index=False)
-    confusion_results.to_csv(output_dir / "confusion_matrices.csv", index=False)
-    for (model, task), group in confusion_results.groupby(["model", "task"]):
-        group.to_csv(output_dir / f"confusion_matrices_{model}_{task}.csv", index=False)
+        _write_result_checkpoint(output_dir, all_rows, all_per_class, all_confusion)
 
-    summary = (
-        fold_results.groupby(["model", "task", "level"])[
-            ["accuracy", "macro_f1", "balanced_accuracy"]
-        ]
-        .agg(["mean", "std"])
-        .reset_index()
-    )
-    summary.columns = [
-        "model",
-        "task",
-        "level",
-        "accuracy_mean",
-        "accuracy_std",
-        "macro_f1_mean",
-        "macro_f1_std",
-        "balanced_accuracy_mean",
-        "balanced_accuracy_std",
-    ]
-    summary = summary.fillna(0.0)
-    summary.to_csv(output_dir / "summary_results.csv", index=False)
-    return fold_results
+    return _write_result_checkpoint(output_dir, all_rows, all_per_class, all_confusion)

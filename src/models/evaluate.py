@@ -30,6 +30,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Include held-out subjects (Subject 1) in LOSO evaluation",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume after folds already checkpointed in the output directory",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override batch size 64; larger CUDA batches are faster but change optimization",
+    )
     return parser
 
 
@@ -47,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
             seed=args.seed,
             quick=args.quick,
             device=args.device,
+            resume=args.resume,
+            batch_size=args.batch_size,
         )
     except (FileNotFoundError, RuntimeError, ValueError, ImportError) as exc:
         raise SystemExit(
