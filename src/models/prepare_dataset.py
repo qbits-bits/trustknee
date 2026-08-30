@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import re
@@ -114,27 +115,83 @@ def _resolve_dataset_dir(dataset_root: Path) -> Path:
     )
 
 
-def _replace_dataset_tree(source_dataset: Path, output_dataset: Path) -> None:
-    """Replace prepared trials from a complete staged copy of the source tree."""
-    if source_dataset == output_dataset:
-        return
+def _replace_dataset_tree(
+    source_dataset: Path,
+    output_dir: Path,
+    metadata: dict[str, pd.DataFrame],
+    report: dict[str, object],
+) -> None:
+    """Stage dataset and all metadata files in a temporary directory, then atomically commit them."""
+    output_dataset = output_dir / "dataset"
+    same_dataset = source_dataset == output_dataset
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_dataset.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        prefix=".trustknee-prepare-", dir=output_dataset.parent
+        prefix=".trustknee-prepare-", dir=output_dir.parent
     ) as temporary_directory:
         temporary_root = Path(temporary_directory)
         staged_dataset = temporary_root / "dataset"
-        previous_dataset = temporary_root / "previous_dataset"
-        shutil.copytree(source_dataset, staged_dataset)
+        staged_participants = temporary_root / "participants.csv"
+        staged_labels = temporary_root / "labels.csv"
+        staged_placement = temporary_root / "placement.csv"
+        staged_sensors = temporary_root / "sensors.csv"
+        staged_report = temporary_root / "preparation_report.json"
 
-        if output_dataset.exists():
-            output_dataset.replace(previous_dataset)
+        # Stage metadata files and report first
+        metadata["participants"].to_csv(staged_participants, index=False)
+        metadata["labels"].to_csv(staged_labels, index=False)
+        metadata["placement"].to_csv(staged_placement, index=False)
+        pd.DataFrame(
+            [
+                ["n_sensors", config.N_SENSORS],
+                ["emg_channels_per_sensor", config.EMG_CHANNELS_PER_SENSOR],
+                ["imu_channels_per_sensor", config.IMU_CHANNELS_PER_SENSOR],
+                ["emg_sampling_rate_hz", config.EMG_SAMPLING_RATE_HZ],
+                ["imu_sampling_rate_hz", config.IMU_SAMPLING_RATE_HZ],
+                ["emg_unit", config.EMG_UNIT],
+                ["accel_unit", config.ACCEL_UNIT],
+                ["gyro_unit", config.GYRO_UNIT],
+            ]
+        ).to_csv(staged_sensors, index=False, header=False)
+        staged_report.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+        # Stage dataset tree if not operating in-place
+        if not same_dataset:
+            shutil.copytree(source_dataset, staged_dataset)
+
+        dest_participants = output_dir / "participants.csv"
+        dest_labels = output_dir / "labels.csv"
+        dest_placement = output_dir / "placement.csv"
+        dest_sensors = output_dir / "sensors.csv"
+        dest_report = output_dir / "preparation_report.json"
+
+        backup_dir = temporary_root / "backup"
+        backup_dir.mkdir(exist_ok=True)
+
+        backups: list[tuple[Path, Path]] = []
+        files_to_swap = [
+            (staged_participants, dest_participants, backup_dir / "participants.csv"),
+            (staged_labels, dest_labels, backup_dir / "labels.csv"),
+            (staged_placement, dest_placement, backup_dir / "placement.csv"),
+            (staged_sensors, dest_sensors, backup_dir / "sensors.csv"),
+            (staged_report, dest_report, backup_dir / "preparation_report.json"),
+        ]
+        if not same_dataset:
+            files_to_swap.append((staged_dataset, output_dataset, backup_dir / "dataset"))
+
+        for _, dest, backup in files_to_swap:
+            if dest.exists():
+                dest.replace(backup)
+                backups.append((dest, backup))
+
         try:
-            staged_dataset.replace(output_dataset)
+            for staged, dest, _ in files_to_swap:
+                staged.replace(dest)
         except Exception:
-            if previous_dataset.exists() and not output_dataset.exists():
-                previous_dataset.replace(output_dataset)
+            for dest, backup in backups:
+                if backup.exists() and not dest.exists():
+                    with contextlib.suppress(Exception):
+                        backup.replace(dest)
             raise
 
 
@@ -227,34 +284,14 @@ def prepare_dataset(
             f"missing labels={trial_report['missing_labels']}"
         )
 
-    output_dataset = output_dir / "dataset"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    _replace_dataset_tree(source_dataset, output_dataset)
-    metadata["participants"].to_csv(output_dir / "participants.csv", index=False)
-    metadata["labels"].to_csv(output_dir / "labels.csv", index=False)
-    metadata["placement"].to_csv(output_dir / "placement.csv", index=False)
-    pd.DataFrame(
-        [
-            ["n_sensors", config.N_SENSORS],
-            ["emg_channels_per_sensor", config.EMG_CHANNELS_PER_SENSOR],
-            ["imu_channels_per_sensor", config.IMU_CHANNELS_PER_SENSOR],
-            ["emg_sampling_rate_hz", config.EMG_SAMPLING_RATE_HZ],
-            ["imu_sampling_rate_hz", config.IMU_SAMPLING_RATE_HZ],
-            ["emg_unit", config.EMG_UNIT],
-            ["accel_unit", config.ACCEL_UNIT],
-            ["gyro_unit", config.GYRO_UNIT],
-        ]
-    ).to_csv(output_dir / "sensors.csv", index=False, header=False)
-
     report = {
         "source_dataset": str(source_dataset),
         "metadata_file": str(metadata_file),
         "output_dir": str(output_dir),
         **trial_report,
     }
-    (output_dir / "preparation_report.json").write_text(
-        json.dumps(report, indent=2), encoding="utf-8"
-    )
+    _replace_dataset_tree(source_dataset, output_dir, metadata, report)
+
     if trial_report["missing_files"] or trial_report["malformed_trials"]:
         logger.warning(
             "Prepared data with %d missing-file trials and %d malformed trials; ingestion will skip them.",
