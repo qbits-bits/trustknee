@@ -57,6 +57,7 @@ def fit_transformer(
     num_classes: int,
     seed: int = 42,
     training_config: TrainingConfig | None = None,
+    device: str = "cpu",
 ) -> tuple[Any, SequenceNormalizer, list[dict[str, float]]]:
     """Train the Transformer and select its state using validation macro-F1."""
     import torch
@@ -67,6 +68,9 @@ def fit_transformer(
 
     cfg = training_config or TrainingConfig()
     set_random_seed(seed)
+    training_device = torch.device(device)
+    if training_device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA training was requested, but CUDA is not available")
     train_indices = np.asarray(train_indices, dtype=int)
     validation_indices = np.asarray(validation_indices, dtype=int)
     normalizer = fit_sequence_normalizer(sequences, train_indices)
@@ -80,11 +84,13 @@ def fit_transformer(
         shuffle=True,
         generator=generator,
     )
-    model = TransformerEncoderClassifier(num_classes=num_classes)
-    class_weights = torch.from_numpy(_class_weights(y_train.numpy(), num_classes))
+    model = TransformerEncoderClassifier(num_classes=num_classes).to(training_device)
+    class_weights = torch.from_numpy(_class_weights(y_train.numpy(), num_classes)).to(
+        training_device
+    )
     loss_function = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate)
-    validation_x = torch.from_numpy(normalized[validation_indices])
+    validation_x = torch.from_numpy(normalized[validation_indices]).to(training_device)
     validation_y = np.asarray(labels, dtype=np.int64)[validation_indices]
 
     best_score = -np.inf
@@ -95,6 +101,8 @@ def fit_transformer(
         model.train()
         losses = []
         for batch_x, batch_y in loader:
+            batch_x = batch_x.to(training_device)
+            batch_y = batch_y.to(training_device)
             optimizer.zero_grad()
             loss = loss_function(model(batch_x), batch_y)
             loss.backward()
@@ -151,7 +159,10 @@ def predict_transformer(
     model.eval()
     with torch.no_grad():
         for (batch_x,) in loader:
-            probabilities.append(torch.softmax(model(batch_x), dim=1).cpu().numpy())
+            model_device = next(model.parameters()).device
+            probabilities.append(
+                torch.softmax(model(batch_x.to(model_device)), dim=1).cpu().numpy()
+            )
     if not probabilities:
         return np.empty((0, model.classifier.out_features), dtype=np.float32)
     result = np.concatenate(probabilities, axis=0).astype(np.float32)
@@ -173,6 +184,25 @@ class ConstantClassifier:
         return result
 
 
+class GlobalClassProbabilityAdapter:
+    """Map estimator-local probability columns back to global task classes."""
+
+    def __init__(self, estimator: Any, class_indices: np.ndarray, num_classes: int) -> None:
+        self.estimator = estimator
+        self.class_indices = np.asarray(class_indices, dtype=int)
+        self.num_classes = int(num_classes)
+
+    def predict_proba(self, values: np.ndarray) -> np.ndarray:
+        local_probabilities = np.asarray(self.estimator.predict_proba(values), dtype=np.float32)
+        if local_probabilities.shape != (len(values), len(self.class_indices)):
+            raise ValueError(
+                "XGBoost probability columns do not match the classes used for this fold"
+            )
+        result = np.zeros((len(values), self.num_classes), dtype=np.float32)
+        result[:, self.class_indices] = local_probabilities
+        return result
+
+
 def fit_xgboost(
     features,
     labels: np.ndarray,
@@ -189,27 +219,30 @@ def fit_xgboost(
     if len(unique) < 2:
         return ConstantClassifier(int(unique[0]), num_classes)
 
+    local_labels = np.searchsorted(unique, y_train)
+    local_num_classes = len(unique)
+
     from xgboost import XGBClassifier
 
-    weights_by_class = _class_weights(y_train, num_classes)
-    sample_weights = weights_by_class[y_train]
+    weights_by_class = _class_weights(local_labels, local_num_classes)
+    sample_weights = weights_by_class[local_labels]
     params = {
         "n_estimators": cfg.xgb_estimators,
         "max_depth": 4,
         "learning_rate": 0.05,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
-        "objective": "multi:softprob" if num_classes > 2 else "binary:logistic",
-        "eval_metric": "mlogloss" if num_classes > 2 else "logloss",
+        "objective": "multi:softprob" if local_num_classes > 2 else "binary:logistic",
+        "eval_metric": "mlogloss" if local_num_classes > 2 else "logloss",
         "random_state": seed,
         "n_jobs": 1,
         "tree_method": "hist",
     }
-    if num_classes > 2:
-        params["num_class"] = num_classes
+    if local_num_classes > 2:
+        params["num_class"] = local_num_classes
     model = XGBClassifier(**params)
-    model.fit(x_train, y_train, sample_weight=sample_weights)
-    return model
+    model.fit(x_train, local_labels, sample_weight=sample_weights)
+    return GlobalClassProbabilityAdapter(model, unique, num_classes)
 
 
 def predict_xgboost(model, features, num_classes: int) -> np.ndarray:

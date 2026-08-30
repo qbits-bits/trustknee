@@ -18,6 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory for result files")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--quick", action="store_true", help="Use a tiny CPU configuration")
+    parser.add_argument(
+        "--device",
+        choices=["cpu", "cuda"],
+        default="cpu",
+        help="Transformer training device; CPU remains the reproducible default",
+    )
     return parser
 
 
@@ -29,7 +35,13 @@ def main(argv: list[str] | None = None) -> int:
         # default excludes the historical single-subject smoke-test holdout,
         # so explicitly include all participants here.
         manifest = build_manifest(args.data_root, exclude_subjects=set())
-        run_loso_comparison(manifest, args.output_dir, seed=args.seed, quick=args.quick)
+        run_loso_comparison(
+            manifest,
+            args.output_dir,
+            seed=args.seed,
+            quick=args.quick,
+            device=args.device,
+        )
     except (FileNotFoundError, RuntimeError, ValueError, ImportError) as exc:
         raise SystemExit(
             f"Real evaluation blocked: {exc}. Prepare the local dataset metadata and install "
