@@ -41,6 +41,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override batch size 64; larger CUDA batches are faster but change optimization",
     )
+    parser.add_argument(
+        "--augment-minority",
+        action="store_true",
+        default=False,
+        help="Apply time-series data augmentation to minority classes (6, 7, 8) in training folds",
+    )
+    parser.add_argument(
+        "--aug-multiplier",
+        type=int,
+        default=3,
+        help="Multiplier for synthetic minority copies per eligible training trial",
+    )
+    parser.add_argument(
+        "--aug-methods",
+        type=str,
+        default="jitter,magnitude_scale,time_warp",
+        help="Comma-separated list of augmentation methods (jitter, magnitude_scale, time_warp, permute_segments)",
+    )
+    parser.add_argument(
+        "--aug-targets",
+        type=str,
+        default="6,7,8",
+        help="Comma-separated list of integer target label IDs to augment",
+    )
     return parser
 
 
@@ -52,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
         # to prevent inter-subject data leakage during model evaluation.
         exclude_subjects = set() if args.include_held_out else None
         manifest = build_manifest(args.data_root, exclude_subjects=exclude_subjects)
+        aug_methods = tuple(m.strip() for m in args.aug_methods.split(",") if m.strip())
+        aug_targets = tuple(int(lbl.strip()) for lbl in args.aug_targets.split(",") if lbl.strip())
         run_loso_comparison(
             manifest,
             args.output_dir,
@@ -60,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             resume=args.resume,
             batch_size=args.batch_size,
+            augment_minority=args.augment_minority,
+            aug_multiplier=args.aug_multiplier,
+            aug_methods=aug_methods,
+            aug_target_labels=aug_targets,
         )
     except (FileNotFoundError, RuntimeError, ValueError, ImportError) as exc:
         raise SystemExit(
