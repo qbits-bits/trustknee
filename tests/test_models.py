@@ -19,6 +19,7 @@ from src.models.model_data import (
     make_transformer_sequences,
 )
 from src.models.normalization import fit_sequence_normalizer
+from src.models.training import QUICK_TRAINING, fit_xgboost, predict_xgboost
 from src.models.transformer import SinusoidalPositionalEncoding, TransformerEncoderClassifier
 
 
@@ -114,6 +115,30 @@ def test_model_dataset_keeps_metadata_out_of_model_features(tmp_path):
     assert not {"subject_id", "trial_id", "window_index", "start_time_s"} & set(
         dataset.feature_names
     )
+
+
+def test_xgboost_maps_sparse_training_classes_to_global_probabilities():
+    features = pd.DataFrame(
+        {
+            "feature_a": np.arange(12, dtype=np.float32),
+            "feature_b": np.tile([0.0, 1.0, 2.0], 4),
+        }
+    )
+    labels = np.array([0, 2, 8, 0, 2, 8, 0, 2, 8, 0, 2, 8])
+    indices = np.arange(len(labels))
+
+    model = fit_xgboost(
+        features,
+        labels,
+        indices,
+        num_classes=9,
+        training_config=QUICK_TRAINING,
+    )
+    probabilities = predict_xgboost(model, features, num_classes=9)
+
+    assert probabilities.shape == (len(features), 9)
+    assert np.allclose(probabilities.sum(axis=1), 1.0)
+    assert np.all(probabilities[:, [1, 3, 4, 5, 6, 7]] == 0.0)
 
 
 def _write_model_dataset(data_root):

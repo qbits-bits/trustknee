@@ -63,3 +63,23 @@ def test_prepare_dataset_writes_reader_layout_and_report(tmp_path):
         json.loads((tmp_path / "prepared" / "preparation_report.json").read_text())["valid_trials"]
         == 39
     )
+
+
+def test_prepare_dataset_refresh_removes_trials_absent_from_source(tmp_path):
+    source = tmp_path / "source"
+    source_dataset = source / "dataset"
+    for subject in range(1, 32):
+        _write_valid_trial(source_dataset / f"Subject_{subject}" / "0" / "Trial_1")
+    for label in range(1, 9):
+        _write_valid_trial(source_dataset / "Subject_1" / str(label) / "Trial_1")
+    metadata_file = tmp_path / "metadata.txt"
+    metadata_file.write_text(_metadata_text(), encoding="utf-8")
+    prepared = tmp_path / "prepared"
+
+    prepare_dataset(source, metadata_file, prepared)
+    obsolete_trial = prepared / "dataset" / "Subject_1" / "0" / "Trial_99"
+    _write_valid_trial(obsolete_trial)
+
+    prepare_dataset(source, metadata_file, prepared)
+
+    assert not obsolete_trial.exists()

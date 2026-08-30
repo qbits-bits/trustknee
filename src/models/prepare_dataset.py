@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -113,6 +114,30 @@ def _resolve_dataset_dir(dataset_root: Path) -> Path:
     )
 
 
+def _replace_dataset_tree(source_dataset: Path, output_dataset: Path) -> None:
+    """Replace prepared trials from a complete staged copy of the source tree."""
+    if source_dataset == output_dataset:
+        return
+
+    output_dataset.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".trustknee-prepare-", dir=output_dataset.parent
+    ) as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        staged_dataset = temporary_root / "dataset"
+        previous_dataset = temporary_root / "previous_dataset"
+        shutil.copytree(source_dataset, staged_dataset)
+
+        if output_dataset.exists():
+            output_dataset.replace(previous_dataset)
+        try:
+            staged_dataset.replace(output_dataset)
+        except Exception:
+            if previous_dataset.exists() and not output_dataset.exists():
+                previous_dataset.replace(output_dataset)
+            raise
+
+
 def _trial_validation(dataset_dir: Path) -> dict[str, object]:
     valid = 0
     missing_files: list[str] = []
@@ -204,8 +229,7 @@ def prepare_dataset(
 
     output_dataset = output_dir / "dataset"
     output_dir.mkdir(parents=True, exist_ok=True)
-    if source_dataset != output_dataset:
-        shutil.copytree(source_dataset, output_dataset, dirs_exist_ok=True)
+    _replace_dataset_tree(source_dataset, output_dataset)
     metadata["participants"].to_csv(output_dir / "participants.csv", index=False)
     metadata["labels"].to_csv(output_dir / "labels.csv", index=False)
     metadata["placement"].to_csv(output_dir / "placement.csv", index=False)

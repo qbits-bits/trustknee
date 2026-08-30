@@ -288,6 +288,7 @@ def _write_experiment_record(
     seed: int,
     quick: bool,
     training_config: TrainingConfig,
+    device: str,
 ) -> None:
     counts = pd.Series(dataset.labels_9).value_counts().sort_index().to_dict()
     subject_count = int(dataset.metadata["subject_id"].nunique())
@@ -306,6 +307,7 @@ This is a research-software record, not a clinical validation report.
 - Primary task: binary Correct (0) versus Wrong (1). Secondary task: nine-class label prediction.
 - Evaluation: leave-one-subject-out; validation subjects are selected only from each training fold.
 - Random seed: {seed}; quick mode: {quick}.
+- Transformer training device: {device}.
 - Transformer: 2 encoder layers, 4 heads, hidden size 64, feed-forward size 128, dropout 0.1, AdamW lr {training_config.learning_rate}.
 - XGBoost: {training_config.xgb_estimators} estimators, depth 4, learning rate 0.05, fixed seed.
 - Hardware/software: {platform.machine()} ({platform.processor() or "CPU information unavailable"}); Python {platform.python_version()}, NumPy {_version("numpy")}, pandas {_version("pandas")}, PyTorch {_version("torch")}, XGBoost {_version("xgboost")}, scikit-learn {_version("scikit-learn")}.
@@ -322,6 +324,7 @@ def run_loso_comparison(
     output_dir: Path,
     seed: int = 42,
     quick: bool = False,
+    device: str = "cpu",
 ) -> pd.DataFrame:
     """Run binary and nine-class LOSO comparisons and write reproducible results."""
     output_dir = Path(output_dir)
@@ -336,6 +339,7 @@ def run_loso_comparison(
     config_record = {
         "seed": seed,
         "quick": quick,
+        "device": device,
         "window_ms": project_config.WINDOW_MS,
         "window_overlap": project_config.WINDOW_OVERLAP,
         "sequence_shape": list(dataset.transformer_sequences.shape[1:]),
@@ -365,7 +369,7 @@ def run_loso_comparison(
         },
     }
     (output_dir / "config.json").write_text(json.dumps(config_record, indent=2), encoding="utf-8")
-    _write_experiment_record(output_dir, dataset, manifest, seed, quick, training_config)
+    _write_experiment_record(output_dir, dataset, manifest, seed, quick, training_config, device)
 
     all_rows: list[dict[str, object]] = []
     all_per_class: list[dict[str, object]] = []
@@ -416,6 +420,7 @@ def run_loso_comparison(
                 num_classes=num_classes,
                 seed=seed + fold,
                 training_config=training_config,
+                device=device,
             )
             transformer_probabilities = predict_transformer(
                 transformer, dataset.transformer_sequences[test_indices], normalizer
