@@ -18,19 +18,16 @@ _TIMEGAN_IMPORT_ERROR: Exception | None = None
 
 try:
     import torch  # noqa: F401
+    from ydata_synthetic.synthesizers import ModelParameters, TrainParameters  # noqa: F401
+    from ydata_synthetic.synthesizers.timeseries import TimeSeriesSynthesizer
 
-    try:
-        from ydata_synthetic.synthesizers.timeseries import TimeGAN as _YDataTimeGAN
-
-        _TIMEGAN_AVAILABLE = True
-        _TIMEGAN_IMPL = "ydata_synthetic"
-    except ImportError as _e2:
-        _TIMEGAN_IMPORT_ERROR = _e2
-        _YDataTimeGAN = None  # type: ignore[assignment]
-        _TIMEGAN_IMPL = None  # type: ignore[assignment]
-except ImportError as _e1:
-    _TIMEGAN_IMPORT_ERROR = _e1
-    _YDataTimeGAN = None  # type: ignore[assignment]
+    _TIMEGAN_AVAILABLE = True
+    _TIMEGAN_IMPL = "ydata_synthetic"
+except ImportError as _e:
+    _TIMEGAN_IMPORT_ERROR = _e
+    TimeSeriesSynthesizer = None  # type: ignore[assignment]
+    ModelParameters = None  # type: ignore[assignment]
+    TrainParameters = None  # type: ignore[assignment]
     _TIMEGAN_IMPL = None  # type: ignore[assignment]
 
 
@@ -113,17 +110,17 @@ class TimeGANAugmenter:
         seq_len = self.seq_len or t_len
         n_features = self.n_features or n_feat
 
-        if _TIMEGAN_AVAILABLE and _YDataTimeGAN is not None:
+        if _TIMEGAN_AVAILABLE and TimeSeriesSynthesizer is not None and ModelParameters is not None:
             try:
-                self._gan = _YDataTimeGAN(
-                    seq_len=seq_len,
-                    n_features=n_features,
-                    hidden_dim=self.hidden_dim,
-                    gamma=self.gamma,
-                    noise_dim=self.noise_dim,
+                model_args = ModelParameters(
                     batch_size=min(self.batch_size, max(1, windows.shape[0])),
-                    learning_rate=self.learning_rate,
+                    lr=self.learning_rate,
+                    noise_dim=self.noise_dim,
+                    layers_dim=self.hidden_dim,
+                    latent_dim=self.hidden_dim,
+                    gamma=self.gamma,
                 )
+                self._gan = TimeSeriesSynthesizer(modelname="timegan", model_parameters=model_args)
                 logger.info(
                     "TimeGANAugmenter: instantiated %s backend (seq_len=%d, n_features=%d)",
                     _TIMEGAN_IMPL,
@@ -154,8 +151,19 @@ class TimeGANAugmenter:
 
         if self._gan is not None and _TIMEGAN_AVAILABLE:
             try:
-                synth = self._gan.generate(n_samples)  # type: ignore[union-attr]
-                arr = np.asarray(synth)
+                # ydata-synthetic TimeSeriesSynthesizer exposes sample(n_samples)
+                synth = (
+                    self._gan.sample(n_samples=n_samples)
+                    if hasattr(self._gan, "sample")
+                    else self._gan.generate(n_samples)
+                )
+                if isinstance(synth, list):
+                    arr = np.stack(
+                        [np.asarray(df.values if hasattr(df, "values") else df) for df in synth]
+                    )
+                else:
+                    arr = np.asarray(synth)
+
                 if arr.shape[0] == n_samples and arr.ndim == 3:
                     # TimeGAN output: (n_samples, seq_len, n_features) -> (n_samples, n_features, seq_len)
                     arr_t = arr.transpose(0, 2, 1)
@@ -164,7 +172,7 @@ class TimeGANAugmenter:
                         out = out.astype(self._windows_dtype, copy=False)
                     return out
             except Exception as exc:  # noqa: BLE001
-                logger.warning("TimeGAN generate failed, falling back to Gaussian sampler: %s", exc)
+                logger.warning("TimeGAN sampling failed, falling back to Gaussian sampler: %s", exc)
 
         assert self._mean is not None and self._std is not None
         flat_dim = self._mean.shape[0]

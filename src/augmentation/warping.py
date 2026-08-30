@@ -86,11 +86,16 @@ def time_warp(
     """Smooth random time warping via cubic-spline warp path.
 
     Following Um et al. 2017 conventions for wearable-sensor augmentation,
-    a smooth warp factor curve is sampled at ``n_knots + 2`` knots, cubic-
-    spline interpolated to length ``T``, then cumulatively summed and
-    normalised to ``[0, T-1]`` to obtain a monotonic time mapping. The
-    signal is then resampled at the warped indices via linear
-    interpolation and returned at the original length.
+    a smooth warp factor curve is defined on continuous normalized time
+    ``[0, 1]`` using ``n_knots + 2`` knots, integrated continuously via
+    analytic cubic-spline antiderivative, and normalised to ``[0, 1]`` to
+    obtain a monotonic continuous time mapping. The signal is then
+    resampled at the warped coordinates via linear interpolation.
+
+    When ``warp_factors`` is pre-sampled and shared across paired modalities
+    with different sampling rates (e.g. 30-sample IMU and 252-sample EMG),
+    the underlying continuous time deformation is mathematically identical
+    and perfectly synchronized in physical time.
 
     Args:
         signal: Array of shape ``(..., T)``.
@@ -120,19 +125,24 @@ def time_warp(
 
     wf = np.clip(wf, 0.1, 3.0)
 
-    knot_x = np.linspace(0, t_len - 1, n_total_knots)
-    orig_steps = np.arange(t_len)
-    cs = CubicSpline(knot_x, wf, bc_type="natural", extrapolate=True)
-    scale_curve = cs(orig_steps)
-    scale_curve = np.clip(scale_curve, 0.05, 5.0)
+    # Formulate spline in continuous normalized time [0.0, 1.0]
+    knot_t = np.linspace(0.0, 1.0, n_total_knots)
+    cs = CubicSpline(knot_t, wf, bc_type="natural")
+    cs_anti = cs.antiderivative()
 
-    warp_steps = np.cumsum(scale_curve)
-    warp_steps = (warp_steps - warp_steps[0]) / (warp_steps[-1] - warp_steps[0]) * (t_len - 1)
-    warp_steps = np.clip(warp_steps, 0, t_len - 1)
+    t_query = np.linspace(0.0, 1.0, t_len)
+    integrated = cs_anti(t_query)
+    total_area = float(cs_anti(1.0) - cs_anti(0.0))
+
+    if abs(total_area) < 1e-9:
+        warp_steps = np.arange(t_len, dtype=np.float64)
+    else:
+        norm_warped_t = (integrated - float(cs_anti(0.0))) / total_area
+        warp_steps = np.clip(norm_warped_t * (t_len - 1), 0.0, t_len - 1)
 
     flat = x.reshape(-1, t_len)
     out_flat = np.empty_like(flat)
-    xp = np.arange(t_len)
+    xp = np.arange(t_len, dtype=np.float64)
     for i in range(flat.shape[0]):
         out_flat[i] = np.interp(warp_steps, xp, flat[i])
 
@@ -173,20 +183,17 @@ def permute_segments(
     if n_segments <= 1 or t_len < n_segments:
         return signal.copy()
 
-    seg_len = t_len // n_segments
-    if seg_len == 0:
-        return signal.copy()
+    perm = (
+        np.random.permutation(n_segments)
+        if permutation is None
+        else np.asarray(permutation, dtype=int)
+    )
+    if len(perm) != n_segments:
+        raise ValueError(f"permutation length ({len(perm)}) must equal n_segments ({n_segments})")
 
-    remainder = t_len % n_segments
-    perm = np.random.permutation(n_segments) if permutation is None else np.asarray(permutation)
-
-    start = 0
-    segs: list[tuple[int, int]] = []
-    for i in range(n_segments):
-        extra = 1 if i < remainder else 0
-        end = start + seg_len + extra
-        segs.append((start, end))
-        start = end
+    # Continuous normalized time cut points rounded to nearest sample index
+    cut_points = [int(round(i * t_len / n_segments)) for i in range(n_segments + 1)]
+    segs = [(cut_points[i], cut_points[i + 1]) for i in range(n_segments)]
 
     flat = x.reshape(-1, t_len)
     out_flat = np.empty_like(flat)
