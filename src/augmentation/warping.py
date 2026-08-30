@@ -191,16 +191,22 @@ def permute_segments(
     if len(perm) != n_segments:
         raise ValueError(f"permutation length ({len(perm)}) must equal n_segments ({n_segments})")
 
-    # Continuous normalized time cut points rounded to nearest sample index
-    cut_points = [int(round(i * t_len / n_segments)) for i in range(n_segments + 1)]
-    segs = [(cut_points[i], cut_points[i + 1]) for i in range(n_segments)]
+    # Continuous normalized time mapping for segment permutation
+    t_out = np.linspace(0.0, 1.0, t_len)
+    t_src = np.empty(t_len, dtype=np.float64)
+    for i, t in enumerate(t_out):
+        j = min(int(t * n_segments), n_segments - 1)
+        alpha = (t - j / n_segments) * n_segments
+        src_seg = perm[j]
+        t_src[i] = (src_seg + alpha) / n_segments
+
+    lookup_idx = np.clip(t_src * (t_len - 1), 0.0, t_len - 1)
+    xp = np.arange(t_len, dtype=np.float64)
 
     flat = x.reshape(-1, t_len)
     out_flat = np.empty_like(flat)
     for i in range(flat.shape[0]):
-        parts = [flat[i][s:e] for s, e in segs]
-        permuted = [parts[p] for p in perm]
-        out_flat[i] = np.concatenate(permuted)
+        out_flat[i] = np.interp(lookup_idx, xp, flat[i])
 
     out = out_flat.reshape(x.shape)
     return out.astype(orig_dtype, copy=False)
