@@ -254,6 +254,8 @@ def build_model_inputs(
     target_labels: tuple[int, ...] = (6, 7, 8),
     aug_methods: tuple[str, ...] = ("jitter", "magnitude_scale", "time_warp"),
     aug_multiplier: int = 3,
+    exclude_subjects: set[int] | None = None,
+    seed: int = 42,
 ) -> ModelDataset:
     """Build aligned Transformer sequences and XGBoost rows from a manifest.
 
@@ -272,6 +274,8 @@ def build_model_inputs(
             window_ms=window_ms,
             overlap=overlap,
             preprocess=preprocess,
+            exclude_subjects=exclude_subjects,
+            seed=seed,
         )
     else:
         trials = generate_windows_from_manifest(

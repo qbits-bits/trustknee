@@ -24,6 +24,7 @@ _METHOD_MAP = {
 def _apply_methods(
     signal: np.ndarray,
     methods: tuple[str, ...],
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     out = signal
     for name in methods:
@@ -32,7 +33,7 @@ def _apply_methods(
             raise ValueError(
                 f"Unknown augmentation method: {name!r}. Available: {sorted(_METHOD_MAP)}"
             )
-        out = fn(out)
+        out = fn(out, rng=rng)
     return out
 
 
@@ -40,24 +41,26 @@ def _apply_multimodal_methods(
     imu: np.ndarray,
     emg: np.ndarray,
     methods: tuple[str, ...],
+    rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    generator = np.random.default_rng() if rng is None else rng
     out_imu = imu
     out_emg = emg
     for name in methods:
         if name == "jitter":
-            out_imu = jitter(out_imu)
-            out_emg = jitter(out_emg)
+            out_imu = jitter(out_imu, rng=generator)
+            out_emg = jitter(out_emg, rng=generator)
         elif name == "magnitude_scale":
-            out_imu = magnitude_scale(out_imu)
-            out_emg = magnitude_scale(out_emg)
+            out_imu = magnitude_scale(out_imu, rng=generator)
+            out_emg = magnitude_scale(out_emg, rng=generator)
         elif name == "time_warp":
             n_total_knots = 4 + 2
-            wf = np.random.normal(loc=1.0, scale=0.2, size=n_total_knots)
+            wf = generator.normal(loc=1.0, scale=0.2, size=n_total_knots)
             out_imu = time_warp(out_imu, warp_factors=wf)
             out_emg = time_warp(out_emg, warp_factors=wf)
         elif name == "permute_segments":
             n_segments = 4
-            perm = np.random.permutation(n_segments)
+            perm = generator.permutation(n_segments)
             out_imu = permute_segments(out_imu, n_segments=n_segments, permutation=perm)
             out_emg = permute_segments(out_emg, n_segments=n_segments, permutation=perm)
         else:
@@ -75,12 +78,14 @@ def augment_minority_classes(
     window_ms: float = config.WINDOW_MS,
     overlap: float = config.WINDOW_OVERLAP,
     preprocess: bool = True,
+    exclude_subjects: set[int] | None = None,
+    seed: int | None = None,
 ) -> list[WindowedTrial]:
     """Augment windows for minority classes.
 
     For each :class:`WindowedTrial` whose ``label_id`` is in
     ``target_labels`` and whose ``subject_id`` is not in
-    ``config.HELD_OUT_LOSO_SUBJECTS``, generate ``multiplier`` synthetic
+    ``exclude_subjects``, generate ``multiplier`` synthetic
     copies by composing the requested augmentation methods in order.
     Multimodal time-domain transformations (e.g. time warping and
     permutation) are synchronized across IMU and EMG channels.
@@ -101,6 +106,9 @@ def augment_minority_classes(
             :func:`generate_windows_from_manifest`.
         overlap: Windowing parameter forwarded.
         preprocess: Whether to filter before windowing.
+        exclude_subjects: Optional set of subject IDs to exclude from augmentation.
+            If None, all subjects present in ``manifest`` are augmented.
+        seed: Optional random seed for reproducible augmentation.
 
     Returns:
         List of :class:`WindowedTrial` containing originals followed by
@@ -116,7 +124,8 @@ def augment_minority_classes(
             raise ValueError(f"Unknown method {m!r}. Choose from {sorted(_METHOD_MAP)}")
 
     target_set = set(target_labels)
-    held_out = set(config.HELD_OUT_LOSO_SUBJECTS)
+    held_out = set(exclude_subjects) if exclude_subjects is not None else set()
+    rng = np.random.default_rng(seed)
 
     base_trials: list[WindowedTrial] = list(
         generate_windows_from_manifest(
@@ -140,7 +149,7 @@ def augment_minority_classes(
             continue
         if wt.subject_id in held_out:
             logger.info(
-                "Skipping LOSO held-out subject %d (label %d) for augmentation",
+                "Skipping excluded subject %d (label %d) for augmentation",
                 wt.subject_id,
                 wt.label_id,
             )
@@ -148,7 +157,9 @@ def augment_minority_classes(
         if wt.n_windows == 0:
             continue
         for _ in range(multiplier):
-            aug_imu, aug_emg = _apply_multimodal_methods(wt.imu_windows, wt.emg_windows, methods)
+            aug_imu, aug_emg = _apply_multimodal_methods(
+                wt.imu_windows, wt.emg_windows, methods, rng=rng
+            )
 
             new_meta = wt.metadata.copy()
             new_meta["synthetic"] = True
