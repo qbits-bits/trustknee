@@ -312,3 +312,27 @@ def test_quick_end_to_end_with_augmentation_writes_loso_results(tmp_path):
     config_data = json.loads((reports_dir / "config.json").read_text(encoding="utf-8"))
     assert config_data["augmentation"]["enabled"] is True
     assert config_data["augmentation"]["multiplier"] == 2
+
+
+def test_build_model_inputs_deterministic_with_seed(tmp_path):
+    _write_model_dataset(tmp_path)
+    from src.ingestion import build_manifest
+
+    manifest = build_manifest(tmp_path, exclude_subjects=set())
+    ds1 = build_model_inputs(
+        manifest,
+        augment_minority=True,
+        aug_multiplier=2,
+        target_labels=(0,),
+        seed=42,
+    )
+    ds2 = build_model_inputs(
+        manifest,
+        augment_minority=True,
+        aug_multiplier=2,
+        target_labels=(0,),
+        seed=42,
+    )
+    np.testing.assert_array_equal(ds1.transformer_sequences, ds2.transformer_sequences)
+    pd.testing.assert_frame_equal(ds1.xgboost_features, ds2.xgboost_features)
+    pd.testing.assert_frame_equal(ds1.metadata, ds2.metadata)

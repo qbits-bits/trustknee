@@ -16,7 +16,11 @@ from scipy.interpolate import CubicSpline
 logger = logging.getLogger("trustknee.augmentation.warping")
 
 
-def jitter(signal: np.ndarray, sigma: float = 0.03) -> np.ndarray:
+def jitter(
+    signal: np.ndarray,
+    sigma: float = 0.03,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
     """Add channel-wise scaled Gaussian noise.
 
     Noise std is ``sigma * per_channel_std`` where ``per_channel_std`` is
@@ -26,17 +30,19 @@ def jitter(signal: np.ndarray, sigma: float = 0.03) -> np.ndarray:
     Args:
         signal: Array of shape ``(..., T)``.
         sigma: Relative noise scale (fraction of per-channel std).
+        rng: Optional NumPy random generator for deterministic reproducibility.
 
     Returns:
         Augmented copy with same shape and dtype as input.
     """
     if signal.size == 0:
         return signal.copy()
+    generator = np.random.default_rng() if rng is None else rng
     orig_dtype = signal.dtype
     x = signal.astype(np.float64, copy=False)
     ch_std = np.std(x, axis=-1, keepdims=True)
     ch_std = np.where(ch_std == 0, 1.0, ch_std)
-    noise = np.random.normal(0.0, 1.0, size=x.shape) * (sigma * ch_std)
+    noise = generator.normal(0.0, 1.0, size=x.shape) * (sigma * ch_std)
     out = x + noise
     return out.astype(orig_dtype, copy=False)
 
@@ -45,6 +51,7 @@ def magnitude_scale(
     signal: np.ndarray,
     scale_range: tuple[float, float] = (0.9, 1.1),
     per_channel: bool = False,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Random magnitude scaling.
 
@@ -57,21 +64,23 @@ def magnitude_scale(
         signal: Array of shape ``(..., T)``.
         scale_range: ``(low, high)`` interval for the uniform draw.
         per_channel: If True draw one scale per channel.
+        rng: Optional NumPy random generator for deterministic reproducibility.
 
     Returns:
         Augmented copy with same shape and dtype as input.
     """
     if signal.size == 0:
         return signal.copy()
+    generator = np.random.default_rng() if rng is None else rng
     orig_dtype = signal.dtype
     x = signal.astype(np.float64, copy=False)
     low, high = scale_range
     if per_channel:
         scale_shape = x.shape[:-1] + (1,)
-        scales = np.random.uniform(low, high, size=scale_shape)
+        scales = generator.uniform(low, high, size=scale_shape)
         scales = np.broadcast_to(scales, x.shape)
     else:
-        scalar = float(np.random.uniform(low, high))
+        scalar = float(generator.uniform(low, high))
         scales = scalar
     out = x * scales
     return out.astype(orig_dtype, copy=False)
@@ -82,6 +91,7 @@ def time_warp(
     sigma: float = 0.2,
     n_knots: int = 4,
     warp_factors: np.ndarray | None = None,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Smooth random time warping via cubic-spline warp path.
 
@@ -117,8 +127,9 @@ def time_warp(
         return signal.copy()
 
     if warp_factors is None:
+        generator = np.random.default_rng() if rng is None else rng
         n_total_knots = n_knots + 2
-        wf = np.random.normal(loc=1.0, scale=sigma, size=n_total_knots)
+        wf = generator.normal(loc=1.0, scale=sigma, size=n_total_knots)
     else:
         wf = np.asarray(warp_factors, dtype=np.float64)
         n_total_knots = len(wf)
@@ -154,6 +165,7 @@ def permute_segments(
     signal: np.ndarray,
     n_segments: int = 4,
     permutation: np.ndarray | list[int] | None = None,
+    rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """Randomly permute time segments.
 
@@ -171,6 +183,7 @@ def permute_segments(
         permutation: Optional pre-sampled permutation array. If provided,
             ensures synchronized segment rearrangement across paired
             modalities (e.g. IMU and EMG).
+        rng: Optional NumPy random generator for deterministic reproducibility.
 
     Returns:
         Augmented copy with same shape and dtype as input.
@@ -183,11 +196,11 @@ def permute_segments(
     if n_segments <= 1 or t_len < n_segments:
         return signal.copy()
 
-    perm = (
-        np.random.permutation(n_segments)
-        if permutation is None
-        else np.asarray(permutation, dtype=int)
-    )
+    if permutation is None:
+        generator = np.random.default_rng() if rng is None else rng
+        perm = generator.permutation(n_segments)
+    else:
+        perm = np.asarray(permutation, dtype=int)
     if len(perm) != n_segments:
         raise ValueError(f"permutation length ({len(perm)}) must equal n_segments ({n_segments})")
 

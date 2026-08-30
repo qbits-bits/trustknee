@@ -453,6 +453,7 @@ def run_loso_comparison(
         target_labels=aug_target_labels,
         aug_methods=aug_methods,
         aug_multiplier=aug_multiplier,
+        seed=seed,
     )
     if not len(dataset.metadata):
         raise ValueError("No usable windows were produced from the supplied manifest")

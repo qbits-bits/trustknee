@@ -169,13 +169,14 @@ def _build_manifest_for_augmentation(tmp_path):
     return manifest
 
 
-def test_augment_minority_only_touches_target_and_respects_held_out(tmp_path):
+def test_augment_minority_respects_exclude_subjects(tmp_path):
     manifest = _build_manifest_for_augmentation(tmp_path)
     augmented = augment_minority_classes(
         manifest,
         target_labels=(6, 7, 8),
         methods=("jitter", "magnitude_scale", "time_warp"),
         multiplier=2,
+        exclude_subjects={1},
     )
     for wt in augmented:
         assert "synthetic" in wt.metadata.columns
@@ -186,14 +187,43 @@ def test_augment_minority_only_touches_target_and_respects_held_out(tmp_path):
     assert len(originals) == 5
     assert all(s.label_id in (6, 7, 8) for s in synthetics)
     assert all(s.subject_id != 1 for s in synthetics)
-    # subject 1 label 6 should not produce synthetics
     # eligible: Subject2 label6 (2 copies), Subject3 label7 (2), label8 (2) => 6 synthetics
     assert len(synthetics) == 6
     assert all(o.label_id == 0 or o.subject_id == 1 or o.label_id in (6, 7, 8) for o in originals)
 
-    # non-target label 0 has no synthetic copies even for subject 2
-    assert not any(s.label_id == 0 for s in synthetics)
-    assert not any(s.subject_id == 1 for s in synthetics)
+
+def test_augment_minority_augments_all_manifest_subjects_when_no_exclude(tmp_path):
+    manifest = _build_manifest_for_augmentation(tmp_path)
+    augmented = augment_minority_classes(
+        manifest,
+        target_labels=(6, 7, 8),
+        methods=("jitter", "magnitude_scale", "time_warp"),
+        multiplier=2,
+        exclude_subjects=None,
+    )
+    synthetics = [w for w in augmented if bool(w.metadata["synthetic"].iloc[0])]
+    # Subject 1 (label 6: 2), Subject 2 (label 6: 2), Subject 3 (label 7: 2, label 8: 2) => 8 synthetics
+    assert len(synthetics) == 8
+    assert any(s.subject_id == 1 for s in synthetics)
+
+
+def test_augment_minority_is_deterministic_with_seed(tmp_path):
+    manifest = _build_manifest_for_augmentation(tmp_path)
+    run1 = augment_minority_classes(manifest, target_labels=(6,), multiplier=2, seed=123)
+    run2 = augment_minority_classes(manifest, target_labels=(6,), multiplier=2, seed=123)
+    run3 = augment_minority_classes(manifest, target_labels=(6,), multiplier=2, seed=456)
+
+    synth1 = [w for w in run1 if bool(w.metadata["synthetic"].iloc[0])]
+    synth2 = [w for w in run2 if bool(w.metadata["synthetic"].iloc[0])]
+    synth3 = [w for w in run3 if bool(w.metadata["synthetic"].iloc[0])]
+
+    assert len(synth1) == len(synth2) == len(synth3)
+    for w1, w2 in zip(synth1, synth2, strict=True):
+        np.testing.assert_array_equal(w1.imu_windows, w2.imu_windows)
+        np.testing.assert_array_equal(w1.emg_windows, w2.emg_windows)
+
+    # Different seeds produce different synthetic values
+    assert not np.array_equal(synth1[0].imu_windows, synth3[0].imu_windows)
 
 
 def test_augment_preserves_window_shapes(tmp_path):
