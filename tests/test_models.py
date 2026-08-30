@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -220,7 +222,93 @@ def test_evaluate_cli_parser_defaults():
     assert args.seed == 42
 
     args_held = parser.parse_args(
-        ["--data-root", "data", "--output-dir", "out", "--include-held-out", "--quick"]
+        [
+            "--data-root",
+            "data",
+            "--output-dir",
+            "out",
+            "--include-held-out",
+            "--quick",
+            "--augment-minority",
+            "--aug-multiplier",
+            "5",
+            "--aug-methods",
+            "jitter,time_warp",
+            "--aug-targets",
+            "6,7",
+        ]
     )
     assert args_held.include_held_out
     assert args_held.quick
+    assert args_held.augment_minority
+    assert args_held.aug_multiplier == 5
+    assert args_held.aug_methods == "jitter,time_warp"
+    assert args_held.aug_targets == "6,7"
+
+
+def test_iter_loso_folds_strictly_excludes_synthetic_from_test():
+    from src.models.evaluation import iter_loso_folds
+
+    metadata = pd.DataFrame(
+        {
+            "subject_id": [1, 1, 1, 2, 2, 2],
+            "synthetic": [False, False, True, False, True, True],
+        }
+    )
+    folds = list(iter_loso_folds(metadata))
+    assert len(folds) == 2
+
+    # Fold 1: held_out = 1
+    held_out_1, train_1, test_1 = folds[0]
+    assert held_out_1 == 1
+    # test_1 must only contain real subject 1 indices (0, 1) and never synthetic (2)
+    assert list(test_1) == [0, 1]
+    # train_1 contains all subject 2 indices (3, 4, 5)
+    assert list(train_1) == [3, 4, 5]
+
+    # Fold 2: held_out = 2
+    held_out_2, train_2, test_2 = folds[1]
+    assert held_out_2 == 2
+    # test_2 must only contain real subject 2 indices (3) and never synthetic (4, 5)
+    assert list(test_2) == [3]
+    # train_2 contains all subject 1 indices (0, 1, 2)
+    assert list(train_2) == [0, 1, 2]
+
+
+def test_subject_validation_split_strictly_excludes_synthetic_from_validation():
+    from src.models.evaluation import subject_validation_split
+
+    metadata = pd.DataFrame(
+        {
+            "subject_id": [2, 2, 2, 3, 3, 3],
+            "synthetic": [False, False, True, False, False, True],
+        }
+    )
+    train_indices = np.array([0, 1, 2, 3, 4, 5])
+    fit_indices, val_indices = subject_validation_split(metadata, train_indices, seed=42)
+
+    # val_indices must only contain non-synthetic rows
+    assert not metadata.iloc[val_indices]["synthetic"].any()
+    # fit_indices + val_indices must cover the training subjects
+    assert set(fit_indices).isdisjoint(set(val_indices))
+
+
+def test_quick_end_to_end_with_augmentation_writes_loso_results(tmp_path):
+    _write_model_dataset(tmp_path)
+    from src.ingestion import build_manifest
+
+    reports_dir = tmp_path / "aug_reports"
+    results = run_loso_comparison(
+        build_manifest(tmp_path, exclude_subjects=set()),
+        reports_dir,
+        quick=True,
+        augment_minority=True,
+        aug_multiplier=2,
+        aug_target_labels=(0,),  # label 0 exists in synthetic test dataset
+    )
+
+    assert {"transformer", "xgboost", "majority_baseline"} <= set(results["model"])
+    assert (reports_dir / "config.json").exists()
+    config_data = json.loads((reports_dir / "config.json").read_text(encoding="utf-8"))
+    assert config_data["augmentation"]["enabled"] is True
+    assert config_data["augmentation"]["multiplier"] == 2

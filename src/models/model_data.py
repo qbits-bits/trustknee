@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -10,7 +11,7 @@ import pandas as pd
 from src import config
 from src.features.extract import extract_window_features
 from src.models.labels import labels_to_binary
-from src.preprocessing.windowing import generate_windows_from_manifest
+from src.preprocessing.windowing import WindowedTrial, generate_windows_from_manifest
 
 MODEL_SEQUENCE_LENGTH = 30
 MODEL_INPUT_DIM = 56
@@ -168,31 +169,17 @@ def _trial_id(subject_id: int, label_id: int, trial_num: int) -> str:
     return f"subject_{int(subject_id)}_label_{int(label_id)}_trial_{int(trial_num)}"
 
 
-def build_model_inputs(
-    manifest: pd.DataFrame,
-    window_ms: float = config.WINDOW_MS,
-    overlap: float = config.WINDOW_OVERLAP,
-    preprocess: bool = True,
+def build_model_inputs_from_trials(
+    windowed_trials: Iterable[WindowedTrial],
 ) -> ModelDataset:
-    """Build aligned Transformer sequences and XGBoost rows from a manifest.
-
-    The two model views are generated from exactly the same windows.  Subject,
-    trial, window, and timestamp columns are stored in ``metadata`` and never
-    copied into either model's feature matrix.
-    """
+    """Build aligned Transformer sequences and XGBoost rows from windowed trials."""
     sequence_batches: list[np.ndarray] = []
     feature_frames: list[pd.DataFrame] = []
     metadata_frames: list[pd.DataFrame] = []
     labels_9: list[np.ndarray] = []
     labels_binary: list[np.ndarray] = []
 
-    for windowed_trial in generate_windows_from_manifest(
-        manifest,
-        window_ms=window_ms,
-        overlap=overlap,
-        preprocess=preprocess,
-        skip_corrupt=True,
-    ):
+    for windowed_trial in windowed_trials:
         if windowed_trial.n_windows == 0:
             continue
         sequences = make_transformer_sequences(
@@ -208,6 +195,10 @@ def build_model_inputs(
         ]
         features = pd.DataFrame(records).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         metadata = windowed_trial.metadata.copy().reset_index(drop=True)
+        if "synthetic" not in metadata.columns:
+            metadata["synthetic"] = False
+        else:
+            metadata["synthetic"] = metadata["synthetic"].astype(bool)
         metadata["trial_id"] = [
             _trial_id(windowed_trial.subject_id, windowed_trial.label_id, windowed_trial.trial_num)
         ] * len(metadata)
@@ -240,6 +231,7 @@ def build_model_inputs(
                     "execution",
                     "exercise",
                     "trial_id",
+                    "synthetic",
                 ]
             ),
         )
@@ -251,3 +243,42 @@ def build_model_inputs(
         labels_binary=np.concatenate(labels_binary),
         metadata=pd.concat(metadata_frames, ignore_index=True),
     )
+
+
+def build_model_inputs(
+    manifest: pd.DataFrame,
+    window_ms: float = config.WINDOW_MS,
+    overlap: float = config.WINDOW_OVERLAP,
+    preprocess: bool = True,
+    augment_minority: bool = False,
+    target_labels: tuple[int, ...] = (6, 7, 8),
+    aug_methods: tuple[str, ...] = ("jitter", "magnitude_scale", "time_warp"),
+    aug_multiplier: int = 3,
+) -> ModelDataset:
+    """Build aligned Transformer sequences and XGBoost rows from a manifest.
+
+    The two model views are generated from exactly the same windows.  Subject,
+    trial, window, and timestamp columns are stored in ``metadata`` and never
+    copied into either model's feature matrix.
+    """
+    if augment_minority:
+        from src.augmentation.pipeline import augment_minority_classes
+
+        trials = augment_minority_classes(
+            manifest,
+            target_labels=target_labels,
+            methods=aug_methods,
+            multiplier=aug_multiplier,
+            window_ms=window_ms,
+            overlap=overlap,
+            preprocess=preprocess,
+        )
+    else:
+        trials = generate_windows_from_manifest(
+            manifest,
+            window_ms=window_ms,
+            overlap=overlap,
+            preprocess=preprocess,
+            skip_corrupt=True,
+        )
+    return build_model_inputs_from_trials(trials)

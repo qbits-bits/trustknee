@@ -39,8 +39,15 @@ EXPECTED_FOLD_RESULT_ROWS = 3 * 2 * 2  # models × tasks × reporting levels
 def iter_loso_folds(metadata: pd.DataFrame) -> Iterator[tuple[int, np.ndarray, np.ndarray]]:
     """Yield ``(held_out_subject, train_rows, test_rows)`` without subject overlap."""
     subjects = np.sort(metadata["subject_id"].unique())
+    is_synthetic = (
+        metadata["synthetic"].to_numpy(dtype=bool)
+        if "synthetic" in metadata.columns
+        else np.zeros(len(metadata), dtype=bool)
+    )
     for held_out in subjects:
-        test_indices = np.flatnonzero(metadata["subject_id"].to_numpy() == held_out)
+        test_indices = np.flatnonzero(
+            (metadata["subject_id"].to_numpy() == held_out) & (~is_synthetic)
+        )
         train_indices = np.flatnonzero(metadata["subject_id"].to_numpy() != held_out)
         yield int(held_out), train_indices, test_indices
 
@@ -56,8 +63,15 @@ def subject_validation_split(
     # A deterministic single-subject validation set keeps the small experiment
     # repeatable and avoids a random window split.
     validation_subject = subjects[np.random.default_rng(seed).integers(len(subjects))]
+    is_synthetic = (
+        metadata["synthetic"].to_numpy(dtype=bool)
+        if "synthetic" in metadata.columns
+        else np.zeros(len(metadata), dtype=bool)
+    )
     validation_mask = metadata["subject_id"].to_numpy() == validation_subject
-    validation_indices = train_indices[validation_mask[train_indices]]
+    validation_indices = train_indices[
+        validation_mask[train_indices] & (~is_synthetic[train_indices])
+    ]
     fit_indices = train_indices[~validation_mask[train_indices]]
     if not len(fit_indices):
         return train_indices, np.empty(0, dtype=int)
@@ -293,10 +307,17 @@ def _write_experiment_record(
     quick: bool,
     training_config: TrainingConfig,
     device: str,
+    augment_minority: bool = False,
+    aug_multiplier: int = 3,
+    aug_methods: tuple[str, ...] = ("jitter", "magnitude_scale", "time_warp"),
+    aug_target_labels: tuple[int, ...] = (6, 7, 8),
 ) -> None:
     counts = pd.Series(dataset.labels_9).value_counts().sort_index().to_dict()
     subject_count = int(dataset.metadata["subject_id"].nunique())
     trial_count = int(dataset.metadata["trial_id"].nunique())
+    synthetic_count = (
+        int(dataset.metadata["synthetic"].sum()) if "synthetic" in dataset.metadata.columns else 0
+    )
     skipped = max(0, len(manifest) - trial_count)
     record = f"""# TrustKnee experiment record
 
@@ -304,7 +325,8 @@ This is a research-software record, not a clinical validation report.
 
 - Dataset/version/source: KneE-PAD dataset, local copy of the source data described by Konstantoudakis et al. (Scientific Data, 2025) and `src/config.py`.
 - Valid trials: {trial_count}; manifest rows skipped or without usable windows: {skipped}.
-- Subjects: {subject_count}; windows: {dataset.n_samples}.
+- Subjects: {subject_count}; windows: {dataset.n_samples} (synthetic: {synthetic_count}).
+- Minority augmentation: {augment_minority} (multiplier={aug_multiplier}, methods={list(aug_methods)}, target_labels={list(aug_target_labels)}).
 - Label counts by nine-class ID: {counts}.
 - Window: {project_config.WINDOW_MS:g} ms with {project_config.WINDOW_OVERLAP:.0%} overlap.
 - Transformer input: {dataset.transformer_sequences.shape[1]} time positions × {dataset.transformer_sequences.shape[2]} values (48 IMU + 8 rectified/binned sEMG activity channels).
@@ -417,11 +439,21 @@ def run_loso_comparison(
     device: str = "cpu",
     resume: bool = False,
     batch_size: int | None = None,
+    augment_minority: bool = False,
+    aug_multiplier: int = 3,
+    aug_methods: tuple[str, ...] = ("jitter", "magnitude_scale", "time_warp"),
+    aug_target_labels: tuple[int, ...] = (6, 7, 8),
 ) -> pd.DataFrame:
     """Run binary and nine-class LOSO comparisons and write reproducible results."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    dataset = build_model_inputs(manifest)
+    dataset = build_model_inputs(
+        manifest,
+        augment_minority=augment_minority,
+        target_labels=aug_target_labels,
+        aug_methods=aug_methods,
+        aug_multiplier=aug_multiplier,
+    )
     if not len(dataset.metadata):
         raise ValueError("No usable windows were produced from the supplied manifest")
     if dataset.metadata["subject_id"].nunique() < 2:
@@ -445,6 +477,12 @@ def run_loso_comparison(
         "evaluation": "leave_one_subject_out",
         "subjects": [int(value) for value in sorted(dataset.metadata["subject_id"].unique())],
         "n_windows": dataset.n_samples,
+        "augmentation": {
+            "enabled": augment_minority,
+            "multiplier": aug_multiplier,
+            "methods": list(aug_methods),
+            "target_labels": list(aug_target_labels),
+        },
         "transformer": {
             "input_dim": 56,
             "d_model": 64,
@@ -474,7 +512,19 @@ def run_loso_comparison(
             raise ValueError("Existing checkpoint configuration does not match this run")
     else:
         config_path.write_text(json.dumps(config_record, indent=2), encoding="utf-8")
-    _write_experiment_record(output_dir, dataset, manifest, seed, quick, training_config, device)
+    _write_experiment_record(
+        output_dir,
+        dataset,
+        manifest,
+        seed,
+        quick,
+        training_config,
+        device,
+        augment_minority=augment_minority,
+        aug_multiplier=aug_multiplier,
+        aug_methods=aug_methods,
+        aug_target_labels=aug_target_labels,
+    )
 
     all_rows, all_per_class, all_confusion, completed_folds = _load_result_checkpoint(
         output_dir, resume
