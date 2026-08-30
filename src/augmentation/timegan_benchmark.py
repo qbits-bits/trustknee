@@ -47,6 +47,7 @@ class TimeGANAugmenter:
         noise_dim: Noise dimension.
         batch_size: Training batch size.
         learning_rate: Learning rate.
+        epochs: Number of training epochs when backend is available.
     """
 
     def __init__(
@@ -58,6 +59,7 @@ class TimeGANAugmenter:
         noise_dim: int = 32,
         batch_size: int = 128,
         learning_rate: float = 0.001,
+        epochs: int = 1,
     ) -> None:
         self.seq_len = seq_len
         self.n_features = n_features
@@ -66,6 +68,7 @@ class TimeGANAugmenter:
         self.noise_dim = noise_dim
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.epochs = epochs
         self._is_fitted = False
         self._windows_shape: tuple[int, ...] | None = None
         self._windows_dtype: np.dtype | None = None
@@ -112,6 +115,8 @@ class TimeGANAugmenter:
 
         if _TIMEGAN_AVAILABLE and TimeSeriesSynthesizer is not None and ModelParameters is not None:
             try:
+                import pandas as pd
+
                 model_args = ModelParameters(
                     batch_size=min(self.batch_size, max(1, windows.shape[0])),
                     lr=self.learning_rate,
@@ -121,14 +126,31 @@ class TimeGANAugmenter:
                     gamma=self.gamma,
                 )
                 self._gan = TimeSeriesSynthesizer(modelname="timegan", model_parameters=model_args)
+
+                train_args = TrainParameters(
+                    epochs=self.epochs,
+                    sequence_length=seq_len,
+                    number_sequences=n_features,
+                )
+                if windows.ndim > 2:
+                    data_3d = windows.reshape(windows.shape[0], n_features, seq_len).transpose(
+                        0, 2, 1
+                    )
+                else:
+                    data_3d = windows[:, :, np.newaxis]
+
+                cols = [f"feat_{i}" for i in range(n_features)]
+                df_list = [pd.DataFrame(data_3d[i], columns=cols) for i in range(data_3d.shape[0])]
+                self._gan.fit(data=df_list, train_arguments=train_args, num_cols=cols)
                 logger.info(
-                    "TimeGANAugmenter: instantiated %s backend (seq_len=%d, n_features=%d)",
+                    "TimeGANAugmenter: fitted %s backend (seq_len=%d, n_features=%d, epochs=%d)",
                     _TIMEGAN_IMPL,
                     seq_len,
                     n_features,
+                    self.epochs,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to instantiate TimeGAN backend, using fallback: %s", exc)
+                logger.warning("Failed to initialize/fit TimeGAN backend: %s", exc)
                 self._gan = None
 
         self._is_fitted = True
@@ -150,29 +172,25 @@ class TimeGANAugmenter:
             raise ValueError(f"n_samples must be positive, got {n_samples}")
 
         if self._gan is not None and _TIMEGAN_AVAILABLE:
-            try:
-                # ydata-synthetic TimeSeriesSynthesizer exposes sample(n_samples)
-                synth = (
-                    self._gan.sample(n_samples=n_samples)
-                    if hasattr(self._gan, "sample")
-                    else self._gan.generate(n_samples)
+            synth = (
+                self._gan.sample(n_samples=n_samples)
+                if hasattr(self._gan, "sample")
+                else self._gan.generate(n_samples)
+            )
+            if isinstance(synth, list):
+                arr = np.stack(
+                    [np.asarray(df.values if hasattr(df, "values") else df) for df in synth]
                 )
-                if isinstance(synth, list):
-                    arr = np.stack(
-                        [np.asarray(df.values if hasattr(df, "values") else df) for df in synth]
-                    )
-                else:
-                    arr = np.asarray(synth)
+            else:
+                arr = np.asarray(synth)
 
-                if arr.shape[0] == n_samples and arr.ndim == 3:
-                    # TimeGAN output: (n_samples, seq_len, n_features) -> (n_samples, n_features, seq_len)
-                    arr_t = arr.transpose(0, 2, 1)
-                    out = arr_t.reshape((n_samples,) + self._windows_shape)
-                    if self._windows_dtype is not None:
-                        out = out.astype(self._windows_dtype, copy=False)
-                    return out
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("TimeGAN sampling failed, falling back to Gaussian sampler: %s", exc)
+            if arr.shape[0] == n_samples and arr.ndim == 3:
+                # TimeGAN output: (n_samples, seq_len, n_features) -> (n_samples, n_features, seq_len)
+                arr_t = arr.transpose(0, 2, 1)
+                out = arr_t.reshape((n_samples,) + self._windows_shape)
+                if self._windows_dtype is not None:
+                    out = out.astype(self._windows_dtype, copy=False)
+                return out
 
         assert self._mean is not None and self._std is not None
         flat_dim = self._mean.shape[0]
