@@ -193,3 +193,19 @@ def test_quick_end_to_end_writes_loso_results(tmp_path):
     assert np.isfinite(results[["accuracy", "macro_f1", "balanced_accuracy"]]).all().all()
     for filename in ["fold_results.csv", "summary_results.csv", "config.json"]:
         assert (tmp_path / "reports" / filename).exists()
+
+
+def test_evaluate_cli_parser_defaults():
+    from src.models.evaluate import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["--data-root", "data", "--output-dir", "out"])
+    assert not args.include_held_out
+    assert not args.quick
+    assert args.seed == 42
+
+    args_held = parser.parse_args(
+        ["--data-root", "data", "--output-dir", "out", "--include-held-out", "--quick"]
+    )
+    assert args_held.include_held_out
+    assert args_held.quick
