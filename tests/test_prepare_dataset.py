@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.models.prepare_dataset import prepare_dataset
 
@@ -83,3 +85,42 @@ def test_prepare_dataset_refresh_removes_trials_absent_from_source(tmp_path):
     prepare_dataset(source, metadata_file, prepared)
 
     assert not obsolete_trial.exists()
+
+
+def test_prepare_dataset_failure_preserves_previous_dataset_and_metadata(tmp_path):
+    source = tmp_path / "source"
+    source_dataset = source / "dataset"
+    for subject in range(1, 32):
+        _write_valid_trial(source_dataset / f"Subject_{subject}" / "0" / "Trial_1")
+    for label in range(1, 9):
+        _write_valid_trial(source_dataset / "Subject_1" / str(label) / "Trial_1")
+    metadata_file = tmp_path / "metadata.txt"
+    metadata_file.write_text(_metadata_text(), encoding="utf-8")
+    prepared = tmp_path / "prepared"
+
+    # Initial successful preparation
+    prepare_dataset(source, metadata_file, prepared)
+    original_participants = (prepared / "participants.csv").read_text(encoding="utf-8")
+    sentinel_trial = prepared / "dataset" / "Subject_1" / "0" / "Trial_1" / "imu.npy"
+    assert sentinel_trial.exists()
+
+    # Create new source with an additional trial
+    new_source = tmp_path / "new_source"
+    new_dataset = new_source / "dataset"
+    for subject in range(1, 32):
+        _write_valid_trial(new_dataset / f"Subject_{subject}" / "0" / "Trial_1")
+    for label in range(1, 9):
+        _write_valid_trial(new_dataset / "Subject_1" / str(label) / "Trial_1")
+    _write_valid_trial(new_dataset / "Subject_1" / "0" / "Trial_999")
+
+    # Simulate a failure during metadata writing
+    with (
+        patch("pandas.DataFrame.to_csv", side_effect=OSError("Disk write failed")),
+        pytest.raises(OSError, match="Disk write failed"),
+    ):
+        prepare_dataset(new_source, metadata_file, prepared)
+
+    # Verify that the prepared directory still has the original metadata and dataset intact
+    assert (prepared / "participants.csv").read_text(encoding="utf-8") == original_participants
+    assert not (prepared / "dataset" / "Subject_1" / "0" / "Trial_999").exists()
+    assert (prepared / "dataset" / "Subject_1" / "0" / "Trial_1" / "imu.npy").exists()
