@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -123,4 +124,48 @@ def test_prepare_dataset_failure_preserves_previous_dataset_and_metadata(tmp_pat
     # Verify that the prepared directory still has the original metadata and dataset intact
     assert (prepared / "participants.csv").read_text(encoding="utf-8") == original_participants
     assert not (prepared / "dataset" / "Subject_1" / "0" / "Trial_999").exists()
+    assert (prepared / "dataset" / "Subject_1" / "0" / "Trial_1" / "imu.npy").exists()
+
+
+def test_prepare_dataset_mid_swap_failure_restores_all_files_without_mixing(tmp_path):
+    source = tmp_path / "source"
+    source_dataset = source / "dataset"
+    for subject in range(1, 32):
+        _write_valid_trial(source_dataset / f"Subject_{subject}" / "0" / "Trial_1")
+    for label in range(1, 9):
+        _write_valid_trial(source_dataset / "Subject_1" / str(label) / "Trial_1")
+    metadata_file = tmp_path / "metadata.txt"
+    metadata_file.write_text(_metadata_text(), encoding="utf-8")
+    prepared = tmp_path / "prepared"
+
+    # Initial successful preparation (generation 1)
+    prepare_dataset(source, metadata_file, prepared)
+    gen1_participants = (prepared / "participants.csv").read_text(encoding="utf-8")
+    gen1_labels = (prepared / "labels.csv").read_text(encoding="utf-8")
+    gen1_placement = (prepared / "placement.csv").read_text(encoding="utf-8")
+    assert (prepared / "dataset" / "Subject_1" / "0" / "Trial_1" / "imu.npy").exists()
+
+    # Create new metadata for generation 2
+    gen2_meta = _metadata_text().replace("label 0", "gen2 label 0")
+    gen2_meta_file = tmp_path / "metadata_gen2.txt"
+    gen2_meta_file.write_text(gen2_meta, encoding="utf-8")
+
+    real_replace = Path.replace
+
+    def mock_replace(self, target):
+        # Fail when installing staged labels.csv, but allow rollback restore from backup
+        if "backup" not in str(self) and target == prepared / "labels.csv":
+            raise OSError("Injected disk failure while swapping labels.csv")
+        return real_replace(self, target)
+
+    with (
+        patch.object(Path, "replace", side_effect=mock_replace, autospec=True),
+        pytest.raises(OSError, match="Injected disk failure"),
+    ):
+        prepare_dataset(source, gen2_meta_file, prepared)
+
+    # All files in prepared must match generation 1 without partial updates
+    assert (prepared / "participants.csv").read_text(encoding="utf-8") == gen1_participants
+    assert (prepared / "labels.csv").read_text(encoding="utf-8") == gen1_labels
+    assert (prepared / "placement.csv").read_text(encoding="utf-8") == gen1_placement
     assert (prepared / "dataset" / "Subject_1" / "0" / "Trial_1" / "imu.npy").exists()

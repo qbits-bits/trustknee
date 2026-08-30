@@ -168,7 +168,7 @@ def _replace_dataset_tree(
         backup_dir = temporary_root / "backup"
         backup_dir.mkdir(exist_ok=True)
 
-        backups: list[tuple[Path, Path]] = []
+        backups: dict[Path, Path] = {}
         files_to_swap = [
             (staged_participants, dest_participants, backup_dir / "participants.csv"),
             (staged_labels, dest_labels, backup_dir / "labels.csv"),
@@ -182,16 +182,29 @@ def _replace_dataset_tree(
         for _, dest, backup in files_to_swap:
             if dest.exists():
                 dest.replace(backup)
-                backups.append((dest, backup))
+                backups[dest] = backup
 
+        installed: list[Path] = []
         try:
             for staged, dest, _ in files_to_swap:
                 staged.replace(dest)
+                installed.append(dest)
         except Exception:
-            for dest, backup in backups:
-                if backup.exists() and not dest.exists():
+            for _, dest, backup in files_to_swap:
+                if dest in backups:
                     with contextlib.suppress(Exception):
+                        if dest.exists():
+                            if dest.is_dir():
+                                shutil.rmtree(dest)
+                            else:
+                                dest.unlink()
                         backup.replace(dest)
+                elif dest in installed:
+                    with contextlib.suppress(Exception):
+                        if dest.is_dir():
+                            shutil.rmtree(dest)
+                        else:
+                            dest.unlink()
             raise
 
 
