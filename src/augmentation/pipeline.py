@@ -36,6 +36,37 @@ def _apply_methods(
     return out
 
 
+def _apply_multimodal_methods(
+    imu: np.ndarray,
+    emg: np.ndarray,
+    methods: tuple[str, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    out_imu = imu
+    out_emg = emg
+    for name in methods:
+        if name == "jitter":
+            out_imu = jitter(out_imu)
+            out_emg = jitter(out_emg)
+        elif name == "magnitude_scale":
+            out_imu = magnitude_scale(out_imu)
+            out_emg = magnitude_scale(out_emg)
+        elif name == "time_warp":
+            n_total_knots = 4 + 2
+            wf = np.random.normal(loc=1.0, scale=0.2, size=n_total_knots)
+            out_imu = time_warp(out_imu, warp_factors=wf)
+            out_emg = time_warp(out_emg, warp_factors=wf)
+        elif name == "permute_segments":
+            n_segments = 4
+            perm = np.random.permutation(n_segments)
+            out_imu = permute_segments(out_imu, n_segments=n_segments, permutation=perm)
+            out_emg = permute_segments(out_emg, n_segments=n_segments, permutation=perm)
+        else:
+            raise ValueError(
+                f"Unknown augmentation method: {name!r}. Available: {sorted(_METHOD_MAP)}"
+            )
+    return out_imu, out_emg
+
+
 def augment_minority_classes(
     manifest: pd.DataFrame,
     target_labels: tuple[int, ...] = (6, 7, 8),
@@ -51,6 +82,8 @@ def augment_minority_classes(
     ``target_labels`` and whose ``subject_id`` is not in
     ``config.HELD_OUT_LOSO_SUBJECTS``, generate ``multiplier`` synthetic
     copies by composing the requested augmentation methods in order.
+    Multimodal time-domain transformations (e.g. time warping and
+    permutation) are synchronized across IMU and EMG channels.
 
     Original trials are preserved with ``metadata["synthetic"] == False``;
     synthetic copies carry ``metadata["synthetic"] == True`` so LOSO
@@ -75,6 +108,9 @@ def augment_minority_classes(
         than a lazy iterator so the caller can inspect ``synthetic``
         counts without consuming an iterator.
     """
+    if multiplier < 0:
+        raise ValueError(f"multiplier must be non-negative, got {multiplier}")
+
     for m in methods:
         if m not in _METHOD_MAP:
             raise ValueError(f"Unknown method {m!r}. Choose from {sorted(_METHOD_MAP)}")
@@ -112,8 +148,7 @@ def augment_minority_classes(
         if wt.n_windows == 0:
             continue
         for _ in range(multiplier):
-            aug_imu = _apply_methods(wt.imu_windows, methods)
-            aug_emg = _apply_methods(wt.emg_windows, methods)
+            aug_imu, aug_emg = _apply_multimodal_methods(wt.imu_windows, wt.emg_windows, methods)
 
             new_meta = wt.metadata.copy()
             new_meta["synthetic"] = True

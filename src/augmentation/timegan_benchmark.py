@@ -88,14 +88,19 @@ class TimeGANAugmenter:
         """Fit the augmenter to one class's windows.
 
         Args:
-            windows: Array of shape ``(n_samples, ..., T)`` or
-                ``(n_samples, seq_len, n_features)``.
+            windows: Array of shape ``(n_samples, ..., T)`` where the last
+                axis is the time dimension.
 
         Returns:
             Self for chaining.
         """
         if windows.size == 0:
             raise ValueError("Cannot fit TimeGANAugmenter on empty array")
+        if windows.ndim < 2:
+            raise ValueError(
+                f"windows must have at least 2 dimensions (n_samples, T), got {windows.shape}"
+            )
+
         self._windows_shape = windows.shape[1:]
         self._windows_dtype = windows.dtype
         flat = windows.reshape(windows.shape[0], -1).astype(np.float64)
@@ -103,15 +108,16 @@ class TimeGANAugmenter:
         self._std = flat.std(axis=0)
         self._std[self._std == 0] = 1.0
 
+        t_len = windows.shape[-1]
+        n_feat = int(np.prod(windows.shape[1:-1])) if windows.ndim > 2 else 1
+        seq_len = self.seq_len or t_len
+        n_features = self.n_features or n_feat
+
         if _TIMEGAN_AVAILABLE and _YDataTimeGAN is not None:
             try:
-                seq_len = (
-                    self.seq_len or windows.shape[1] if windows.ndim >= 2 else windows.shape[-1]
-                )
-                n_feat = int(np.prod(windows.shape[2:])) if windows.ndim > 2 else 1
                 self._gan = _YDataTimeGAN(
                     seq_len=seq_len,
-                    n_features=n_feat,
+                    n_features=n_features,
                     hidden_dim=self.hidden_dim,
                     gamma=self.gamma,
                     noise_dim=self.noise_dim,
@@ -122,7 +128,7 @@ class TimeGANAugmenter:
                     "TimeGANAugmenter: instantiated %s backend (seq_len=%d, n_features=%d)",
                     _TIMEGAN_IMPL,
                     seq_len,
-                    n_feat,
+                    n_features,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to instantiate TimeGAN backend, using fallback: %s", exc)
@@ -150,10 +156,13 @@ class TimeGANAugmenter:
             try:
                 synth = self._gan.generate(n_samples)  # type: ignore[union-attr]
                 arr = np.asarray(synth)
-                if arr.shape[0] == n_samples:
+                if arr.shape[0] == n_samples and arr.ndim == 3:
+                    # TimeGAN output: (n_samples, seq_len, n_features) -> (n_samples, n_features, seq_len)
+                    arr_t = arr.transpose(0, 2, 1)
+                    out = arr_t.reshape((n_samples,) + self._windows_shape)
                     if self._windows_dtype is not None:
-                        arr = arr.astype(self._windows_dtype, copy=False)
-                    return arr
+                        out = out.astype(self._windows_dtype, copy=False)
+                    return out
             except Exception as exc:  # noqa: BLE001
                 logger.warning("TimeGAN generate failed, falling back to Gaussian sampler: %s", exc)
 
