@@ -24,6 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="cpu",
         help="Transformer training device; CPU remains the reproducible default",
     )
+    parser.add_argument(
+        "--include-held-out",
+        action="store_true",
+        default=False,
+        help="Include held-out subjects (Subject 1) in LOSO evaluation",
+    )
     return parser
 
 
@@ -31,10 +37,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     try:
-        # The model evaluator owns the complete LOSO split.  The ingestion
-        # default excludes the historical single-subject smoke-test holdout,
-        # so explicitly include all participants here.
-        manifest = build_manifest(args.data_root, exclude_subjects=set())
+        # Respect the global LOSO held-out subject exclusion by default
+        # to prevent inter-subject data leakage during model evaluation.
+        exclude_subjects = set() if args.include_held_out else None
+        manifest = build_manifest(args.data_root, exclude_subjects=exclude_subjects)
         run_loso_comparison(
             manifest,
             args.output_dir,
