@@ -77,7 +77,12 @@ def magnitude_scale(
     return out.astype(orig_dtype, copy=False)
 
 
-def time_warp(signal: np.ndarray, sigma: float = 0.2, n_knots: int = 4) -> np.ndarray:
+def time_warp(
+    signal: np.ndarray,
+    sigma: float = 0.2,
+    n_knots: int = 4,
+    warp_factors: np.ndarray | None = None,
+) -> np.ndarray:
     """Smooth random time warping via cubic-spline warp path.
 
     Following Um et al. 2017 conventions for wearable-sensor augmentation,
@@ -91,6 +96,9 @@ def time_warp(signal: np.ndarray, sigma: float = 0.2, n_knots: int = 4) -> np.nd
         signal: Array of shape ``(..., T)``.
         sigma: Std of the random warp factors centred at 1.0.
         n_knots: Number of interior knots (total knots = n_knots + 2).
+        warp_factors: Optional pre-sampled knot warp factors. If provided,
+            these are used directly to ensure synchronized warping across
+            paired modalities (e.g. IMU and EMG).
 
     Returns:
         Augmented copy with same shape and dtype as input.
@@ -103,13 +111,18 @@ def time_warp(signal: np.ndarray, sigma: float = 0.2, n_knots: int = 4) -> np.nd
     if t_len <= 1:
         return signal.copy()
 
-    n_total_knots = n_knots + 2
-    knot_x = np.linspace(0, t_len - 1, n_total_knots)
-    warp_factors = np.random.normal(loc=1.0, scale=sigma, size=n_total_knots)
-    warp_factors = np.clip(warp_factors, 0.1, 3.0)
+    if warp_factors is None:
+        n_total_knots = n_knots + 2
+        wf = np.random.normal(loc=1.0, scale=sigma, size=n_total_knots)
+    else:
+        wf = np.asarray(warp_factors, dtype=np.float64)
+        n_total_knots = len(wf)
 
+    wf = np.clip(wf, 0.1, 3.0)
+
+    knot_x = np.linspace(0, t_len - 1, n_total_knots)
     orig_steps = np.arange(t_len)
-    cs = CubicSpline(knot_x, warp_factors, bc_type="natural", extrapolate=True)
+    cs = CubicSpline(knot_x, wf, bc_type="natural", extrapolate=True)
     scale_curve = cs(orig_steps)
     scale_curve = np.clip(scale_curve, 0.05, 5.0)
 
@@ -127,7 +140,11 @@ def time_warp(signal: np.ndarray, sigma: float = 0.2, n_knots: int = 4) -> np.nd
     return out.astype(orig_dtype, copy=False)
 
 
-def permute_segments(signal: np.ndarray, n_segments: int = 4) -> np.ndarray:
+def permute_segments(
+    signal: np.ndarray,
+    n_segments: int = 4,
+    permutation: np.ndarray | list[int] | None = None,
+) -> np.ndarray:
     """Randomly permute time segments.
 
     Warning:
@@ -141,6 +158,9 @@ def permute_segments(signal: np.ndarray, n_segments: int = 4) -> np.ndarray:
     Args:
         signal: Array of shape ``(..., T)``.
         n_segments: Number of equal-length segments to permute.
+        permutation: Optional pre-sampled permutation array. If provided,
+            ensures synchronized segment rearrangement across paired
+            modalities (e.g. IMU and EMG).
 
     Returns:
         Augmented copy with same shape and dtype as input.
@@ -158,7 +178,7 @@ def permute_segments(signal: np.ndarray, n_segments: int = 4) -> np.ndarray:
         return signal.copy()
 
     remainder = t_len % n_segments
-    perm = np.random.permutation(n_segments)
+    perm = np.random.permutation(n_segments) if permutation is None else np.asarray(permutation)
 
     start = 0
     segs: list[tuple[int, int]] = []
