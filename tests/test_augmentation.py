@@ -222,11 +222,11 @@ def test_augment_minority_negative_multiplier_raises(tmp_path):
 
 
 def test_multimodal_synchronized_warping_and_permutation():
-    # Construct pulse signals in segment 1 for IMU (30 samples) and EMG (300 samples)
+    # Construct pulse signals in segment 1 for IMU (30 samples) and EMG (252 samples)
     imu = np.zeros((8, 6, 30), dtype=np.float64)
-    emg = np.zeros((8, 300), dtype=np.float64)
-    imu[:, :, 10] = 10.0
-    emg[:, 100] = 10.0
+    emg = np.zeros((8, 252), dtype=np.float64)
+    imu[:, :, 11] = 10.0
+    emg[:, 95] = 10.0
 
     wf = np.array([0.5, 1.5, 2.0, 0.8, 1.2, 0.6])
     warped_imu = time_warp(imu, warp_factors=wf)
@@ -234,14 +234,14 @@ def test_multimodal_synchronized_warping_and_permutation():
 
     # Peak relative position should be identical in both warped signals
     imu_peak_rel = np.argmax(warped_imu[0, 0]) / (30 - 1)
-    emg_peak_rel = np.argmax(warped_emg[0]) / (300 - 1)
+    emg_peak_rel = np.argmax(warped_emg[0]) / (252 - 1)
     assert abs(imu_peak_rel - emg_peak_rel) < 0.05
 
     # Test synchronized permutation
     perm = [2, 0, 3, 1]
     p_imu = permute_segments(imu, n_segments=4, permutation=perm)
     p_emg = permute_segments(emg, n_segments=4, permutation=perm)
-    assert np.argmax(p_imu[0, 0]) / 30 == pytest.approx(np.argmax(p_emg[0]) / 300, abs=0.05)
+    assert np.argmax(p_imu[0, 0]) / 30 == pytest.approx(np.argmax(p_emg[0]) / 252, abs=0.05)
 
 
 def test_timegan_tensor_dimensions_and_shapes():
