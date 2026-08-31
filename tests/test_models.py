@@ -10,8 +10,13 @@ import pytest
 
 from src import config
 from src.models.evaluation import (
+    FIXED_TEST_SUBJECTS,
+    FIXED_TRAIN_SUBJECTS,
+    FIXED_VALIDATION_SUBJECTS,
     average_trial_probabilities,
+    fixed_subject_split,
     iter_loso_folds,
+    run_fixed_split_comparison,
     run_loso_comparison,
 )
 from src.models.labels import binary_label_from_execution, labels_to_binary
@@ -87,6 +92,33 @@ def test_loso_folds_keep_subjects_separate():
         assert set(metadata.iloc[test_indices].subject_id) == {held_out}
 
 
+def test_fixed_subject_split_is_deterministic_and_disjoint():
+    metadata = pd.DataFrame({"subject_id": np.repeat(np.arange(1, 32), 2)})
+    train_indices, validation_indices, test_indices = fixed_subject_split(metadata)
+    partitions = [
+        set(metadata.iloc[indices].subject_id)
+        for indices in (train_indices, validation_indices, test_indices)
+    ]
+
+    assert partitions == [
+        set(FIXED_TRAIN_SUBJECTS),
+        set(FIXED_VALIDATION_SUBJECTS),
+        set(FIXED_TEST_SUBJECTS),
+    ]
+    assert not partitions[0] & partitions[1]
+    assert not partitions[0] & partitions[2]
+    assert not partitions[1] & partitions[2]
+    assert 1 not in set().union(*partitions)
+
+
+def test_fixed_subject_split_rejects_overlap_and_missing_subjects():
+    metadata = pd.DataFrame({"subject_id": [1, 2, 3]})
+    with pytest.raises(ValueError, match="overlap"):
+        fixed_subject_split(metadata, [1], [1], [3])
+    with pytest.raises(ValueError, match="missing subjects"):
+        fixed_subject_split(metadata, [1], [2], [4])
+
+
 def test_trial_probability_averaging_groups_overlapping_windows():
     metadata = pd.DataFrame(
         {
@@ -144,7 +176,7 @@ def test_xgboost_maps_sparse_training_classes_to_global_probabilities():
     assert model.estimator.get_params()["n_jobs"] == -1
 
 
-def _write_model_dataset(data_root):
+def _write_model_dataset(data_root, subjects=(1, 2)):
     participants = pd.DataFrame(
         [
             {
@@ -156,7 +188,7 @@ def _write_model_dataset(data_root):
                 "Leg": "Right",
                 "Pathology": "None",
             }
-            for subject in [1, 2]
+            for subject in subjects
         ]
     )
     participants.to_csv(data_root / "participants.csv", index=False)
@@ -174,7 +206,7 @@ def _write_model_dataset(data_root):
     ).to_csv(data_root / "placement.csv", index=False)
     (data_root / "sensors.csv").write_text("n_sensors,8\n", encoding="utf-8")
     rng = np.random.default_rng(42)
-    for subject in [1, 2]:
+    for subject in subjects:
         for label in [0, 1]:
             trial_dir = data_root / "dataset" / f"Subject_{subject}" / str(label) / "Trial_1"
             trial_dir.mkdir(parents=True)
@@ -210,6 +242,40 @@ def test_quick_end_to_end_writes_loso_results(tmp_path):
     )
 
 
+def test_quick_end_to_end_writes_fixed_split_results(tmp_path):
+    _write_model_dataset(tmp_path, subjects=(1, 2, 3))
+    from src.ingestion import build_manifest
+
+    manifest = build_manifest(tmp_path, exclude_subjects=set())
+    results = run_fixed_split_comparison(
+        manifest,
+        tmp_path / "fixed-reports",
+        quick=True,
+        train_subjects=[1],
+        validation_subjects=[2],
+        test_subjects=[3],
+    )
+
+    assert len(results) == 12
+    assert set(results["n_train_subjects"]) == {1}
+    assert set(results["n_validation_subjects"]) == {1}
+    assert set(results["n_test_subjects"]) == {1}
+    assert np.isfinite(results[["accuracy", "macro_f1", "balanced_accuracy"]]).all().all()
+    config = (tmp_path / "fixed-reports" / "config.json").read_text(encoding="utf-8")
+    assert '"evaluation": "fixed_subject_split"' in config
+
+    resumed = run_fixed_split_comparison(
+        manifest,
+        tmp_path / "fixed-reports",
+        quick=True,
+        resume=True,
+        train_subjects=[1],
+        validation_subjects=[2],
+        test_subjects=[3],
+    )
+    pd.testing.assert_frame_equal(results, resumed, check_dtype=False)
+
+
 def test_evaluate_cli_parser_defaults():
     from src.models.evaluate import build_parser
 
@@ -219,6 +285,7 @@ def test_evaluate_cli_parser_defaults():
     assert not args.quick
     assert not args.resume
     assert args.batch_size is None
+    assert args.evaluation == "loso"
     assert args.seed == 42
 
     args_held = parser.parse_args(
