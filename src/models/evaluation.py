@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import platform
@@ -364,6 +365,48 @@ def _version(name: str) -> str:
         return "unavailable"
 
 
+def _model_dataset_fingerprint(dataset: ModelDataset) -> str:
+    """Identify all processed model inputs and grouping metadata for safe resume."""
+    digest = hashlib.sha256()
+
+    def update_array(name: str, values: np.ndarray) -> None:
+        array = np.ascontiguousarray(values)
+        digest.update(name.encode("utf-8"))
+        digest.update(str(array.shape).encode("ascii"))
+        digest.update(array.dtype.str.encode("ascii"))
+        view = memoryview(array).cast("B")
+        chunk_size = 8 * 1024 * 1024
+        for offset in range(0, len(view), chunk_size):
+            digest.update(view[offset : offset + chunk_size])
+
+    update_array("transformer_sequences", dataset.transformer_sequences)
+    digest.update(json.dumps(dataset.feature_names, separators=(",", ":")).encode("utf-8"))
+    update_array("xgboost_features", dataset.xgboost_features.to_numpy(dtype=np.float32))
+    update_array("labels_9", dataset.labels_9)
+    update_array("labels_binary", dataset.labels_binary)
+
+    metadata_columns = [
+        column
+        for column in (
+            "subject_id",
+            "label_id",
+            "trial_num",
+            "trial_id",
+            "window_index",
+            "start_time_s",
+            "end_time_s",
+            "synthetic",
+        )
+        if column in dataset.metadata.columns
+    ]
+    digest.update(json.dumps(metadata_columns, separators=(",", ":")).encode("utf-8"))
+    metadata_hashes = pd.util.hash_pandas_object(
+        dataset.metadata[metadata_columns], index=False, categorize=True
+    ).to_numpy(dtype=np.uint64)
+    update_array("metadata", metadata_hashes)
+    return digest.hexdigest()
+
+
 def _write_experiment_record(
     output_dir: Path,
     dataset: ModelDataset,
@@ -563,6 +606,7 @@ def run_loso_comparison(
         "evaluation": "leave_one_subject_out",
         "subjects": [int(value) for value in sorted(dataset.metadata["subject_id"].unique())],
         "n_windows": dataset.n_samples,
+        "dataset_fingerprint_sha256": _model_dataset_fingerprint(dataset),
         "augmentation": {
             "enabled": augment_minority,
             "multiplier": aug_multiplier,
@@ -778,6 +822,7 @@ def run_fixed_split_comparison(
             {int(value) for value in manifest["subject_id"].unique()} - selected_subjects
         ),
         "n_windows": len(train_indices) + len(validation_indices) + len(test_indices),
+        "dataset_fingerprint_sha256": _model_dataset_fingerprint(dataset),
         "transformer": {
             "input_dim": 56,
             "d_model": 64,
