@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import platform
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -35,6 +36,32 @@ logger = logging.getLogger("trustknee.models")
 
 EXPECTED_FOLD_RESULT_ROWS = 3 * 2 * 2  # models × tasks × reporting levels
 
+FIXED_TRAIN_SUBJECTS = (
+    2,
+    5,
+    7,
+    8,
+    9,
+    11,
+    12,
+    14,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    31,
+)
+FIXED_VALIDATION_SUBJECTS = (4, 13, 16, 30)
+FIXED_TEST_SUBJECTS = (3, 6, 10, 15, 29)
+
 
 def iter_loso_folds(metadata: pd.DataFrame) -> Iterator[tuple[int, np.ndarray, np.ndarray]]:
     """Yield ``(held_out_subject, train_rows, test_rows)`` without subject overlap."""
@@ -50,6 +77,45 @@ def iter_loso_folds(metadata: pd.DataFrame) -> Iterator[tuple[int, np.ndarray, n
         )
         train_indices = np.flatnonzero(metadata["subject_id"].to_numpy() != held_out)
         yield int(held_out), train_indices, test_indices
+
+
+def fixed_subject_split(
+    metadata: pd.DataFrame,
+    train_subjects: Iterable[int] = FIXED_TRAIN_SUBJECTS,
+    validation_subjects: Iterable[int] = FIXED_VALIDATION_SUBJECTS,
+    test_subjects: Iterable[int] = FIXED_TEST_SUBJECTS,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return row indices for one explicit, leakage-free subject partition."""
+    partitions = {
+        "train": {int(subject) for subject in train_subjects},
+        "validation": {int(subject) for subject in validation_subjects},
+        "test": {int(subject) for subject in test_subjects},
+    }
+    if any(not subjects for subjects in partitions.values()):
+        raise ValueError("Fixed train, validation, and test subject sets must be non-empty")
+    names = list(partitions)
+    for index, left_name in enumerate(names):
+        for right_name in names[index + 1 :]:
+            overlap = partitions[left_name] & partitions[right_name]
+            if overlap:
+                raise ValueError(
+                    f"Fixed subject partitions overlap between {left_name} and {right_name}: "
+                    f"{sorted(overlap)}"
+                )
+
+    available = {int(subject) for subject in metadata["subject_id"].unique()}
+    requested = set().union(*partitions.values())
+    missing = requested - available
+    if missing:
+        raise ValueError(f"Fixed subject partition is missing subjects: {sorted(missing)}")
+
+    subject_ids = metadata["subject_id"].to_numpy()
+    indices = tuple(
+        np.flatnonzero(np.isin(subject_ids, sorted(partitions[name]))) for name in names
+    )
+    if any(not len(values) for values in indices):
+        raise ValueError("Fixed subject partition produced an empty row set")
+    return indices
 
 
 def subject_validation_split(
@@ -124,7 +190,7 @@ def _metric_rows(
     task: str,
     fold: int,
     level: str,
-    held_out_subject: int,
+    held_out_subject: int | None,
     n_train_subjects: int,
     n_validation_subjects: int,
     n_test_subjects: int,
@@ -211,7 +277,7 @@ def _evaluate_prediction(
     model: str,
     task: str,
     fold: int,
-    held_out_subject: int,
+    held_out_subject: int | None,
     train_indices: np.ndarray,
     validation_indices: np.ndarray,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
@@ -299,6 +365,48 @@ def _version(name: str) -> str:
         return "unavailable"
 
 
+def _model_dataset_fingerprint(dataset: ModelDataset) -> str:
+    """Identify all processed model inputs and grouping metadata for safe resume."""
+    digest = hashlib.sha256()
+
+    def update_array(name: str, values: np.ndarray) -> None:
+        array = np.ascontiguousarray(values)
+        digest.update(name.encode("utf-8"))
+        digest.update(str(array.shape).encode("ascii"))
+        digest.update(array.dtype.str.encode("ascii"))
+        view = memoryview(array).cast("B")
+        chunk_size = 8 * 1024 * 1024
+        for offset in range(0, len(view), chunk_size):
+            digest.update(view[offset : offset + chunk_size])
+
+    update_array("transformer_sequences", dataset.transformer_sequences)
+    digest.update(json.dumps(dataset.feature_names, separators=(",", ":")).encode("utf-8"))
+    update_array("xgboost_features", dataset.xgboost_features.to_numpy(dtype=np.float32))
+    update_array("labels_9", dataset.labels_9)
+    update_array("labels_binary", dataset.labels_binary)
+
+    metadata_columns = [
+        column
+        for column in (
+            "subject_id",
+            "label_id",
+            "trial_num",
+            "trial_id",
+            "window_index",
+            "start_time_s",
+            "end_time_s",
+            "synthetic",
+        )
+        if column in dataset.metadata.columns
+    ]
+    digest.update(json.dumps(metadata_columns, separators=(",", ":")).encode("utf-8"))
+    metadata_hashes = pd.util.hash_pandas_object(
+        dataset.metadata[metadata_columns], index=False, categorize=True
+    ).to_numpy(dtype=np.uint64)
+    update_array("metadata", metadata_hashes)
+    return digest.hexdigest()
+
+
 def _write_experiment_record(
     output_dir: Path,
     dataset: ModelDataset,
@@ -307,6 +415,7 @@ def _write_experiment_record(
     quick: bool,
     training_config: TrainingConfig,
     device: str,
+    evaluation_description: str,
     augment_minority: bool = False,
     aug_multiplier: int = 3,
     aug_methods: tuple[str, ...] = ("jitter", "magnitude_scale", "time_warp"),
@@ -331,7 +440,7 @@ This is a research-software record, not a clinical validation report.
 - Window: {project_config.WINDOW_MS:g} ms with {project_config.WINDOW_OVERLAP:.0%} overlap.
 - Transformer input: {dataset.transformer_sequences.shape[1]} time positions × {dataset.transformer_sequences.shape[2]} values (48 IMU + 8 rectified/binned sEMG activity channels).
 - Primary task: binary Correct (0) versus Wrong (1). Secondary task: nine-class label prediction.
-- Evaluation: leave-one-subject-out; validation subjects are selected only from each training fold.
+- Evaluation: {evaluation_description}.
 - Random seed: {seed}; quick mode: {quick}.
 - Transformer training device: {device}.
 - Transformer: 2 encoder layers, 4 heads, hidden size 64, feed-forward size 128, dropout 0.1, AdamW lr {training_config.learning_rate}.
@@ -371,6 +480,25 @@ def _atomic_write_csv(frame: pd.DataFrame, path: Path) -> None:
     temporary_path = path.with_suffix(f"{path.suffix}.tmp")
     frame.to_csv(temporary_path, index=False)
     temporary_path.replace(path)
+
+
+def _validate_or_write_run_config(
+    output_dir: Path, config_record: dict[str, object], resume: bool
+) -> None:
+    config_path = output_dir / "config.json"
+    checkpoint_paths = (
+        output_dir / "fold_results.csv",
+        output_dir / "per_class_results.csv",
+        output_dir / "confusion_matrices.csv",
+    )
+    if resume and not config_path.exists() and any(path.exists() for path in checkpoint_paths):
+        raise ValueError("Resume requires config.json to identify existing checkpoint files")
+    if resume and config_path.exists():
+        existing_config = json.loads(config_path.read_text(encoding="utf-8"))
+        if existing_config != config_record:
+            raise ValueError("Existing checkpoint configuration does not match this run")
+        return
+    config_path.write_text(json.dumps(config_record, indent=2), encoding="utf-8")
 
 
 def _write_result_checkpoint(
@@ -478,6 +606,7 @@ def run_loso_comparison(
         "evaluation": "leave_one_subject_out",
         "subjects": [int(value) for value in sorted(dataset.metadata["subject_id"].unique())],
         "n_windows": dataset.n_samples,
+        "dataset_fingerprint_sha256": _model_dataset_fingerprint(dataset),
         "augmentation": {
             "enabled": augment_minority,
             "multiplier": aug_multiplier,
@@ -506,13 +635,7 @@ def run_loso_comparison(
             "n_jobs": training_config.xgb_n_jobs,
         },
     }
-    config_path = output_dir / "config.json"
-    if resume and config_path.exists():
-        existing_config = json.loads(config_path.read_text(encoding="utf-8"))
-        if existing_config != config_record:
-            raise ValueError("Existing checkpoint configuration does not match this run")
-    else:
-        config_path.write_text(json.dumps(config_record, indent=2), encoding="utf-8")
+    _validate_or_write_run_config(output_dir, config_record, resume)
     _write_experiment_record(
         output_dir,
         dataset,
@@ -521,6 +644,7 @@ def run_loso_comparison(
         quick,
         training_config,
         device,
+        "leave-one-subject-out; validation subjects are selected only from each training fold",
         augment_minority=augment_minority,
         aug_multiplier=aug_multiplier,
         aug_methods=aug_methods,
@@ -556,7 +680,7 @@ def run_loso_comparison(
         )
         for task, labels in task_labels.items():
             num_classes = task_classes[task]
-            baseline_probabilities = _majority_probabilities(labels, train_indices, num_classes)[
+            baseline_probabilities = _majority_probabilities(labels, fit_indices, num_classes)[
                 test_indices
             ]
             baseline_rows, baseline_classes, baseline_confusion = _evaluate_prediction(
@@ -569,7 +693,7 @@ def run_loso_comparison(
                 task=task,
                 fold=fold,
                 held_out_subject=held_out,
-                train_indices=train_indices,
+                train_indices=fit_indices,
                 validation_indices=validation_indices,
             )
             all_rows.extend(baseline_rows)
@@ -601,7 +725,7 @@ def run_loso_comparison(
                 task=task,
                 fold=fold,
                 held_out_subject=held_out,
-                train_indices=train_indices,
+                train_indices=fit_indices,
                 validation_indices=validation_indices,
             )
             all_rows.extend(transformer_rows)
@@ -611,7 +735,7 @@ def run_loso_comparison(
             xgb_model = fit_xgboost(
                 dataset.xgboost_features,
                 labels,
-                train_indices,
+                fit_indices,
                 num_classes=num_classes,
                 seed=seed + fold,
                 training_config=training_config,
@@ -629,7 +753,7 @@ def run_loso_comparison(
                 task=task,
                 fold=fold,
                 held_out_subject=held_out,
-                train_indices=train_indices,
+                train_indices=fit_indices,
                 validation_indices=validation_indices,
             )
             all_rows.extend(xgb_rows)
@@ -638,4 +762,195 @@ def run_loso_comparison(
 
         _write_result_checkpoint(output_dir, all_rows, all_per_class, all_confusion)
 
-    return _write_result_checkpoint(output_dir, all_rows, all_per_class, all_confusion)
+    _write_result_checkpoint(output_dir, all_rows, all_per_class, all_confusion)
+    return pd.read_csv(output_dir / "fold_results.csv")
+
+
+def run_fixed_split_comparison(
+    manifest: pd.DataFrame,
+    output_dir: Path,
+    seed: int = 42,
+    quick: bool = False,
+    device: str = "cpu",
+    resume: bool = False,
+    batch_size: int | None = None,
+    train_subjects: Iterable[int] = FIXED_TRAIN_SUBJECTS,
+    validation_subjects: Iterable[int] = FIXED_VALIDATION_SUBJECTS,
+    test_subjects: Iterable[int] = FIXED_TEST_SUBJECTS,
+) -> pd.DataFrame:
+    """Run one controlled subject-wise train/validation/test comparison."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    train_subject_list = sorted({int(value) for value in train_subjects})
+    validation_subject_list = sorted({int(value) for value in validation_subjects})
+    test_subject_list = sorted({int(value) for value in test_subjects})
+    selected_subjects = set(train_subject_list + validation_subject_list + test_subject_list)
+    evaluation_manifest = manifest.loc[
+        manifest["subject_id"].astype(int).isin(selected_subjects)
+    ].reset_index(drop=True)
+    dataset = build_model_inputs(evaluation_manifest)
+    if not len(dataset.metadata):
+        raise ValueError("No usable windows were produced from the supplied manifest")
+
+    train_indices, validation_indices, test_indices = fixed_subject_split(
+        dataset.metadata,
+        train_subject_list,
+        validation_subject_list,
+        test_subject_list,
+    )
+    training_config = QUICK_TRAINING if quick else TrainingConfig()
+    if batch_size is not None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        training_config = replace(training_config, batch_size=batch_size)
+
+    config_record = {
+        "seed": seed,
+        "quick": quick,
+        "device": device,
+        "window_ms": project_config.WINDOW_MS,
+        "window_overlap": project_config.WINDOW_OVERLAP,
+        "sequence_shape": list(dataset.transformer_sequences.shape[1:]),
+        "emg_representation": "absolute value followed by equal-duration bin averages",
+        "primary_task": "binary",
+        "secondary_task": "nine_class",
+        "evaluation": "fixed_subject_split",
+        "train_subjects": train_subject_list,
+        "validation_subjects": validation_subject_list,
+        "test_subjects": test_subject_list,
+        "excluded_subjects": sorted(
+            {int(value) for value in manifest["subject_id"].unique()} - selected_subjects
+        ),
+        "n_windows": len(train_indices) + len(validation_indices) + len(test_indices),
+        "dataset_fingerprint_sha256": _model_dataset_fingerprint(dataset),
+        "transformer": {
+            "input_dim": 56,
+            "d_model": 64,
+            "nhead": 4,
+            "num_layers": 2,
+            "dim_feedforward": 128,
+            "dropout": 0.1,
+            "max_seq_len": 30,
+            "optimizer": "AdamW",
+            "learning_rate": training_config.learning_rate,
+            "batch_size": training_config.batch_size,
+            "max_epochs": training_config.max_epochs,
+            "patience": training_config.patience,
+        },
+        "xgboost": {
+            "n_estimators": training_config.xgb_estimators,
+            "max_depth": 4,
+            "learning_rate": 0.05,
+            "seed": seed,
+            "n_jobs": training_config.xgb_n_jobs,
+        },
+    }
+    _validate_or_write_run_config(output_dir, config_record, resume)
+    _write_experiment_record(
+        output_dir,
+        dataset,
+        evaluation_manifest,
+        seed,
+        quick,
+        training_config,
+        device,
+        f"fixed subject split with {len(train_subject_list)} training, "
+        f"{len(validation_subject_list)} validation, and "
+        f"{len(test_subject_list)} untouched test subjects",
+    )
+
+    all_rows, all_per_class, all_confusion, completed_folds = _load_result_checkpoint(
+        output_dir, resume
+    )
+    if 1 in completed_folds:
+        return pd.DataFrame(all_rows)
+
+    normalized_sequences, sequence_normalizer = normalize_sequences(
+        dataset.transformer_sequences, train_indices
+    )
+    task_labels = {"binary": dataset.labels_binary, "nine_class": dataset.labels_9}
+    task_classes = {"binary": 2, "nine_class": 9}
+    for task, labels in task_labels.items():
+        num_classes = task_classes[task]
+        baseline_probabilities = _majority_probabilities(labels, train_indices, num_classes)[
+            test_indices
+        ]
+        baseline_rows, baseline_classes, baseline_confusion = _evaluate_prediction(
+            dataset,
+            test_indices,
+            baseline_probabilities,
+            labels,
+            num_classes,
+            model="majority_baseline",
+            task=task,
+            fold=1,
+            held_out_subject=None,
+            train_indices=train_indices,
+            validation_indices=validation_indices,
+        )
+        all_rows.extend(baseline_rows)
+        all_per_class.extend(baseline_classes)
+        all_confusion.extend(baseline_confusion)
+
+        transformer, normalizer, _ = fit_transformer(
+            dataset.transformer_sequences,
+            labels,
+            train_indices,
+            validation_indices,
+            num_classes=num_classes,
+            seed=seed,
+            training_config=training_config,
+            device=device,
+            normalizer=sequence_normalizer,
+            normalized_sequences=normalized_sequences,
+        )
+        transformer_probabilities = predict_transformer(
+            transformer, dataset.transformer_sequences[test_indices], normalizer
+        )
+        transformer_rows, transformer_classes, transformer_confusion = _evaluate_prediction(
+            dataset,
+            test_indices,
+            transformer_probabilities,
+            labels,
+            num_classes,
+            model="transformer",
+            task=task,
+            fold=1,
+            held_out_subject=None,
+            train_indices=train_indices,
+            validation_indices=validation_indices,
+        )
+        all_rows.extend(transformer_rows)
+        all_per_class.extend(transformer_classes)
+        all_confusion.extend(transformer_confusion)
+
+        xgb_model = fit_xgboost(
+            dataset.xgboost_features,
+            labels,
+            train_indices,
+            num_classes=num_classes,
+            seed=seed,
+            training_config=training_config,
+        )
+        xgb_probabilities = predict_xgboost(
+            xgb_model, dataset.xgboost_features.iloc[test_indices], num_classes
+        )
+        xgb_rows, xgb_classes, xgb_confusion = _evaluate_prediction(
+            dataset,
+            test_indices,
+            xgb_probabilities,
+            labels,
+            num_classes,
+            model="xgboost",
+            task=task,
+            fold=1,
+            held_out_subject=None,
+            train_indices=train_indices,
+            validation_indices=validation_indices,
+        )
+        all_rows.extend(xgb_rows)
+        all_per_class.extend(xgb_classes)
+        all_confusion.extend(xgb_confusion)
+
+    _write_result_checkpoint(output_dir, all_rows, all_per_class, all_confusion)
+    return pd.read_csv(output_dir / "fold_results.csv")

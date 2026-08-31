@@ -39,8 +39,13 @@ def __getattr__(name: str):
         from src.models.evaluation import run_loso_comparison
 
         return run_loso_comparison
+    if name == "run_fixed_split_comparison":
+        from src.models.evaluation import run_fixed_split_comparison
+
+        return run_fixed_split_comparison
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__.append("TransformerEncoderClassifier")
 __all__.append("run_loso_comparison")
+__all__.append("run_fixed_split_comparison")
