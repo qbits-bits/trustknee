@@ -439,6 +439,25 @@ def _atomic_write_csv(frame: pd.DataFrame, path: Path) -> None:
     temporary_path.replace(path)
 
 
+def _validate_or_write_run_config(
+    output_dir: Path, config_record: dict[str, object], resume: bool
+) -> None:
+    config_path = output_dir / "config.json"
+    checkpoint_paths = (
+        output_dir / "fold_results.csv",
+        output_dir / "per_class_results.csv",
+        output_dir / "confusion_matrices.csv",
+    )
+    if resume and not config_path.exists() and any(path.exists() for path in checkpoint_paths):
+        raise ValueError("Resume requires config.json to identify existing checkpoint files")
+    if resume and config_path.exists():
+        existing_config = json.loads(config_path.read_text(encoding="utf-8"))
+        if existing_config != config_record:
+            raise ValueError("Existing checkpoint configuration does not match this run")
+        return
+    config_path.write_text(json.dumps(config_record, indent=2), encoding="utf-8")
+
+
 def _write_result_checkpoint(
     output_dir: Path,
     rows: list[dict[str, object]],
@@ -572,13 +591,7 @@ def run_loso_comparison(
             "n_jobs": training_config.xgb_n_jobs,
         },
     }
-    config_path = output_dir / "config.json"
-    if resume and config_path.exists():
-        existing_config = json.loads(config_path.read_text(encoding="utf-8"))
-        if existing_config != config_record:
-            raise ValueError("Existing checkpoint configuration does not match this run")
-    else:
-        config_path.write_text(json.dumps(config_record, indent=2), encoding="utf-8")
+    _validate_or_write_run_config(output_dir, config_record, resume)
     _write_experiment_record(
         output_dir,
         dataset,
@@ -787,13 +800,7 @@ def run_fixed_split_comparison(
             "n_jobs": training_config.xgb_n_jobs,
         },
     }
-    config_path = output_dir / "config.json"
-    if resume and config_path.exists():
-        existing_config = json.loads(config_path.read_text(encoding="utf-8"))
-        if existing_config != config_record:
-            raise ValueError("Existing checkpoint configuration does not match this run")
-    else:
-        config_path.write_text(json.dumps(config_record, indent=2), encoding="utf-8")
+    _validate_or_write_run_config(output_dir, config_record, resume)
     _write_experiment_record(
         output_dir,
         dataset,

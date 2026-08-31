@@ -275,6 +275,18 @@ def test_quick_end_to_end_writes_fixed_split_results(tmp_path):
     )
     pd.testing.assert_frame_equal(results, resumed, check_dtype=False)
 
+    (tmp_path / "fixed-reports" / "config.json").unlink()
+    with pytest.raises(ValueError, match="requires config.json"):
+        run_fixed_split_comparison(
+            manifest,
+            tmp_path / "fixed-reports",
+            quick=True,
+            resume=True,
+            train_subjects=[1],
+            validation_subjects=[2],
+            test_subjects=[3],
+        )
+
 
 def test_evaluate_cli_parser_defaults():
     from src.models.evaluate import build_parser
