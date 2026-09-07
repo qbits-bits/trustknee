@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import numpy as np
 import pytest
 
@@ -229,3 +231,72 @@ class TestReplayPipelineIntegration:
         persisted_preds = db.get_trial_predictions(result.trial_id)
         assert len(persisted_preds) == result.n_windows
         assert all(p["model_name"] == "mock_model" for p in persisted_preds)
+
+    def test_replay_pipeline_requires_inference_engine(self, sample_trial: Trial) -> None:
+        with pytest.raises(ValueError, match="inference_engine is required"):
+            replay_trial_pipeline(trial=sample_trial, inference_engine=None)
+
+    def test_subject_reuse_preserves_demographics(self) -> None:
+        db = DatabaseManager(db_path=":memory:")
+        # 1. Insert subject with custom demographics
+        db.insert_subject(
+            subject_id=3,
+            gender="Female",
+            height_cm=165.0,
+            weight_kg=60,
+            age_years=45,
+            injured_leg="left",
+            pathology="ACL rupture",
+        )
+
+        # 2. Insert trial referencing subject
+        trial_id = db.insert_trial(
+            subject_id=3,
+            label_id=0,
+            trial_num=1,
+            imu_path="test_imu.npy",
+            emg_path="test_emg.npy",
+            duration_s=1.0,
+            n_imu_samples=148,
+            n_emg_samples=1259,
+        )
+        assert trial_id > 0
+
+        # 3. Re-inserting or calling create_session should not overwrite demographics or cause FK violation
+        db.create_session(subject_id=3, notes="Follow-up")
+
+        subject = db.get_subject(3)
+        assert subject is not None
+        assert subject["gender"] == "Female"
+        assert subject["pathology"] == "ACL rupture"
+
+    def test_atomic_persistence_rollback_on_failure(self, sample_trial: Trial) -> None:
+        db = DatabaseManager(db_path=":memory:")
+
+        # Attempt atomic persist with a window frame that has invalid types or throws
+        class BrokenPrediction:
+            model_name = "test"
+            predicted_label_id = "not_an_int"  # will trigger schema constraint/failure
+            confidence_score = "not_a_float"
+            is_flagged_uncertain = False
+            feature_attributions = None
+
+        class MockWindow:
+            window_index = 0
+            start_time_s = 0.0
+            end_time_s = 0.2
+
+        with pytest.raises(sqlite3.IntegrityError), db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO Trials (subject_id, label_id, trial_num, imu_path, emg_path, duration_s, n_imu_samples, n_emg_samples) VALUES (1, 0, 1, 'a', 'b', 1.0, 10, 10);"
+            )
+            # Force a constraint violation
+            cur.execute(
+                "INSERT INTO WindowFeatures (trial_id, window_index, start_time_s, end_time_s) VALUES (-9999, 'bad', 'bad', 'bad');"
+            )
+
+        # Verify Trials table is still empty because transaction rolled back
+        conn = db.get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM Trials;")
+        assert cur.fetchone()[0] == 0

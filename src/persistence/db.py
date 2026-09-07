@@ -122,16 +122,34 @@ class DatabaseManager:
         age_years: int = 30,
         injured_leg: str = "right",
         pathology: str | None = None,
+        update_existing: bool = False,
     ) -> None:
-        """Insert or update a subject record."""
+        """Insert or update a subject record without deleting the parent row."""
         with self.transaction() as cur:
-            cur.execute(
-                """
-                INSERT OR REPLACE INTO Subjects (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology)
-                VALUES (?, ?, ?, ?, ?, ?, ?);
-                """,
-                (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology),
-            )
+            if update_existing:
+                cur.execute(
+                    """
+                    INSERT INTO Subjects (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(subject_id) DO UPDATE SET
+                        gender=excluded.gender,
+                        height_cm=excluded.height_cm,
+                        weight_kg=excluded.weight_kg,
+                        age_years=excluded.age_years,
+                        injured_leg=excluded.injured_leg,
+                        pathology=excluded.pathology;
+                    """,
+                    (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO Subjects (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(subject_id) DO NOTHING;
+                    """,
+                    (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology),
+                )
 
     def create_session(
         self,
@@ -267,6 +285,14 @@ class DatabaseManager:
             )
             return int(cur.lastrowid)
 
+    def get_subject(self, subject_id: int) -> dict[str, Any] | None:
+        """Query subject demographics by ID."""
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM Subjects WHERE subject_id = ?;", (subject_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
     def get_trial(self, trial_id: int) -> dict[str, Any] | None:
         """Query trial metadata by ID."""
         conn = self.get_connection()
@@ -293,6 +319,102 @@ class DatabaseManager:
             (trial_id,),
         )
         return [dict(row) for row in cur.fetchall()]
+
+    def persist_replay_trial(
+        self,
+        subject_id: int,
+        label_id: int,
+        trial_num: int,
+        imu_path: str,
+        emg_path: str,
+        duration_s: float,
+        n_imu_samples: int,
+        n_emg_samples: int,
+        windows: list[Any],
+        predictions: list[Any],
+        feedback_text: str | None = None,
+    ) -> int:
+        """Atomically persist a replayed trial, its windows, predictions, attributions, and feedback in one transaction."""
+        with self.transaction() as cur:
+            # 1. Ensure subject exists without overwriting demographics
+            cur.execute(
+                """
+                INSERT INTO Subjects (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology)
+                VALUES (?, 'Unknown', 170.0, 70, 30, 'right', NULL)
+                ON CONFLICT(subject_id) DO NOTHING;
+                """,
+                (subject_id,),
+            )
+
+            # 2. Insert Trial record
+            cur.execute(
+                """
+                INSERT INTO Trials (subject_id, label_id, trial_num, imu_path, emg_path, duration_s, n_imu_samples, n_emg_samples)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    subject_id,
+                    label_id,
+                    trial_num,
+                    str(imu_path),
+                    str(emg_path),
+                    float(duration_s),
+                    int(n_imu_samples),
+                    int(n_emg_samples),
+                ),
+            )
+            trial_id = int(cur.lastrowid)
+
+            # 3. Insert Windows, Predictions, and Attributions
+            source_pid: int | None = None
+            for win, pred in zip(windows, predictions, strict=True):
+                cur.execute(
+                    """
+                    INSERT INTO WindowFeatures (trial_id, window_index, start_time_s, end_time_s)
+                    VALUES (?, ?, ?, ?);
+                    """,
+                    (trial_id, win.window_index, float(win.start_time_s), float(win.end_time_s)),
+                )
+                win_id = int(cur.lastrowid)
+
+                cur.execute(
+                    """
+                    INSERT INTO Predictions (window_id, model_name, predicted_label_id, confidence_score, is_flagged_uncertain)
+                    VALUES (?, ?, ?, ?, ?);
+                    """,
+                    (
+                        win_id,
+                        pred.model_name,
+                        int(pred.predicted_label_id),
+                        float(pred.confidence_score),
+                        bool(pred.is_flagged_uncertain),
+                    ),
+                )
+                pred_id = int(cur.lastrowid)
+                if source_pid is None:
+                    source_pid = pred_id
+
+                if getattr(pred, "feature_attributions", None):
+                    for feat_name, feat_val in pred.feature_attributions.items():
+                        cur.execute(
+                            """
+                            INSERT INTO ShapAttributions (prediction_id, feature_name, attribution_value)
+                            VALUES (?, ?, ?);
+                            """,
+                            (pred_id, str(feat_name), float(feat_val)),
+                        )
+
+            # 4. Insert Feedback (linked to first prediction)
+            if feedback_text and source_pid is not None:
+                cur.execute(
+                    """
+                    INSERT INTO Feedback (trial_id, source_prediction_id, feedback_text)
+                    VALUES (?, ?, ?);
+                    """,
+                    (trial_id, source_pid, str(feedback_text)),
+                )
+
+            return trial_id
 
     def close(self) -> None:
         """Close connection if open."""
