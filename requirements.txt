@@ -8,5 +8,6 @@ scikit-learn==1.6.1
 torch==2.6.0+cpu
 xgboost==1.7.6
 pytest==9.1.1
+pytest-cov==7.1.0
 ruff==0.9.6
 pre-commit==4.1.0

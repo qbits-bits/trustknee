@@ -24,10 +24,10 @@ python3 -m venv .venv
 ## Running tests
 
 ```bash
-pytest -q
+pytest -q --cov=src --cov-report=term-missing --cov-fail-under=70
 ```
 
-Tests use synthetic data; the real KneE-PAD dataset is not required.
+Tests use synthetic data; the real KneE-PAD dataset is not required. The coverage gate matches CI and the Docker tester stage, so a passing local run reproduces both. Use `pytest -q <path> --no-cov` for focused runs on a subset of tests.
 
 ## Linting
 

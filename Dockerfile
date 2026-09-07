@@ -39,7 +39,7 @@ COPY docs/ ./docs/
 # Execute linter, format check, and test suite during build validation
 RUN ruff check . && \
     ruff format --check . && \
-    pytest -v
+    pytest -v --cov=src --cov-report=term-missing --cov-fail-under=70
 
 # ==============================================================================
 # Stage 3: Runtime (Minimal, secure production image)
