@@ -35,7 +35,7 @@ jobs:
         run: |
           uv venv
           uv pip install -r requirements.txt
-          PYTHONPATH=. uv run pytest -v
+          PYTHONPATH=. uv run pytest -v --cov=src --cov-report=term-missing --cov-fail-under=70
 
   docker-validate:
     name: Multi-Stage Container Validation
