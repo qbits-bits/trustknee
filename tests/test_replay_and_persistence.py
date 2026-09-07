@@ -270,6 +270,19 @@ class TestReplayPipelineIntegration:
         assert subject["gender"] == "Female"
         assert subject["pathology"] == "ACL rupture"
 
+    def test_placeholder_upgraded_by_authoritative_write(self) -> None:
+        db = DatabaseManager(db_path=":memory:")
+        db.create_session(subject_id=4, notes="Placeholder first")
+        assert db.get_subject(4)["gender"] == "Unknown"
+
+        db.insert_subject(subject_id=4, gender="Male", height_cm=180.0, weight_kg=80, age_years=35)
+        subject = db.get_subject(4)
+        assert subject["gender"] == "Male"
+        assert subject["height_cm"] == 180.0
+
+        db.create_session(subject_id=4, notes="Ensure does not downgrade")
+        assert db.get_subject(4)["gender"] == "Male"
+
     def test_atomic_persistence_rollback_on_failure(self, sample_trial: Trial) -> None:
         db = DatabaseManager(db_path=":memory:")
 

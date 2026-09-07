@@ -113,6 +113,15 @@ class DatabaseManager:
                     ),
                 )
 
+    PLACEHOLDER_SUBJECT: dict[str, Any] = {
+        "gender": "Unknown",
+        "height_cm": 170.0,
+        "weight_kg": 70,
+        "age_years": 30,
+        "injured_leg": "right",
+        "pathology": None,
+    }
+
     def insert_subject(
         self,
         subject_id: int,
@@ -124,31 +133,38 @@ class DatabaseManager:
         pathology: str | None = None,
         update_existing: bool = False,
     ) -> None:
-        """Insert or update a subject record without deleting the parent row."""
+        """Insert a subject, upgrading placeholder rows with authoritative values."""
         with self.transaction() as cur:
-            if update_existing:
+            cur.execute(
+                "SELECT gender, height_cm, weight_kg, age_years, injured_leg, pathology FROM Subjects WHERE subject_id = ?;",
+                (subject_id,),
+            )
+            existing = cur.fetchone()
+            if existing is None:
                 cur.execute(
                     """
                     INSERT INTO Subjects (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(subject_id) DO UPDATE SET
-                        gender=excluded.gender,
-                        height_cm=excluded.height_cm,
-                        weight_kg=excluded.weight_kg,
-                        age_years=excluded.age_years,
-                        injured_leg=excluded.injured_leg,
-                        pathology=excluded.pathology;
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
                     """,
                     (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology),
                 )
-            else:
+                return
+            is_placeholder = all(existing[k] == v for k, v in self.PLACEHOLDER_SUBJECT.items())
+            has_authoritative = (
+                gender != "Unknown"
+                or height_cm != 170.0
+                or weight_kg != 70
+                or age_years != 30
+                or injured_leg != "right"
+                or pathology is not None
+            )
+            if update_existing or (is_placeholder and has_authoritative):
                 cur.execute(
                     """
-                    INSERT INTO Subjects (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(subject_id) DO NOTHING;
+                    UPDATE Subjects SET gender=?, height_cm=?, weight_kg=?, age_years=?, injured_leg=?, pathology=?
+                    WHERE subject_id=?;
                     """,
-                    (subject_id, gender, height_cm, weight_kg, age_years, injured_leg, pathology),
+                    (gender, height_cm, weight_kg, age_years, injured_leg, pathology, subject_id),
                 )
 
     def create_session(
