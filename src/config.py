@@ -20,6 +20,38 @@ DEFAULT_DATA_ROOT = Path("/content/drive/MyDrive/Data")
 # from Drive cannot silently reintroduce these subjects into training.
 HELD_OUT_LOSO_SUBJECTS = {1}
 
+# Canonical Phase 3 subject partitions for reproducible benchmarking.
+# Subject 1 is strictly held out for final benchmark evaluation.
+# The remaining 30 participants (2..31) are partitioned deterministically (seed=42)
+# into 70% train (21 subjects), ~13% validation (4 subjects), ~17% test (5 subjects).
+PHASE3_HELD_OUT_SUBJECTS: tuple[int, ...] = (1,)
+PHASE3_TRAIN_SUBJECTS: tuple[int, ...] = (
+    2,
+    5,
+    7,
+    8,
+    9,
+    11,
+    12,
+    14,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    31,
+)
+PHASE3_VAL_SUBJECTS: tuple[int, ...] = (4, 13, 16, 30)
+PHASE3_TEST_SUBJECTS: tuple[int, ...] = (3, 6, 10, 15, 29)
+PHASE3_RANDOM_SEED: int = 42
+
 # Sensor hardware constants, confirmed against the KneE-PAD data descriptor.
 N_SENSORS = 8
 EMG_CHANNELS_PER_SENSOR = 1
