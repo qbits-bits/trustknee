@@ -41,6 +41,15 @@ class XGBoostArtifactAdapter(InferenceEngine):
         )
         self.artifact = joblib.load(artifact_path)
         self.model = self.artifact["model"]
+
+        # Patch for XGBoost pickle compatibility across different environments
+        if not hasattr(self.model, "use_label_encoder"):
+            self.model.use_label_encoder = False
+        if not hasattr(self.model, "gpu_id"):
+            self.model.gpu_id = -1
+        if not hasattr(self.model, "predictor"):
+            self.model.predictor = "cpu_predictor"
+
         self.feature_order = list(self.artifact["feature_order"])
         self.clip = self.artifact["clip"]
         self.threshold = float(self.artifact["threshold"])
@@ -127,7 +136,7 @@ class XGBoostArtifactAdapter(InferenceEngine):
                     exercise=None,
                     model_name=self.model_name,
                     subject_id=(int(row["subject_id"]) if "subject_id" in row else None),
-                    trial_num=int(row["trial_num"]) if "trial_num" in row else None,
+                    trial_num=(int(row["trial_num"]) if "trial_num" in row else None),
                 )
             )
         return predictions

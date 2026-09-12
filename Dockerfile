@@ -35,6 +35,7 @@ COPY src/ ./src/
 COPY tests/ ./tests/
 COPY db/ ./db/
 COPY docs/ ./docs/
+COPY models/ ./models/
 
 # Execute linter, format check, and test suite during build validation
 RUN ruff check . && \
