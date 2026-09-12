@@ -199,16 +199,16 @@ def build_features(df):
 
     # rolling + interactions
     def rmean(c, w):
-        return grp[c].transform(lambda x: x.rolling(w, min_periods=1, center=True).mean())
+        return grp[c].transform(lambda x: x.rolling(w, min_periods=1).mean())
 
     def rstd(c, w):
-        return grp[c].transform(lambda x: x.rolling(w, min_periods=1, center=True).std().fillna(0))
+        return grp[c].transform(lambda x: x.rolling(w, min_periods=1).std().fillna(0))
 
     def rmin(c, w):
-        return grp[c].transform(lambda x: x.rolling(w, min_periods=1, center=True).min())
+        return grp[c].transform(lambda x: x.rolling(w, min_periods=1).min())
 
     def rmax(c, w):
-        return grp[c].transform(lambda x: x.rolling(w, min_periods=1, center=True).max())
+        return grp[c].transform(lambda x: x.rolling(w, min_periods=1).max())
 
     for L, R in [(1, 5), (2, 6), (3, 7), (4, 8)]:
         c = f"sym_ratio_emg_{L}{R}"

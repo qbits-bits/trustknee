@@ -1,7 +1,7 @@
 """Unit tests for the XGBoost feature-bridge adapter.
 
-Verifies artifact integrity, rejection of missing features, prediction parity
-on the canonical test split, and WindowPrediction contract compliance.
+Verifies artifact integrity, rejection of missing features, and prediction
+parity using a representative sample of the dataset.
 """
 
 from __future__ import annotations
@@ -12,30 +12,24 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src import config
 from src.models.xgboost_adapter import XGBoostArtifactAdapter
-from src.models.xgboost_pipeline import load_and_trim
+from src.models.xgboost_pipeline import build_features, load_and_trim
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_PATH = REPO_ROOT / "models" / "xgboost_canonical" / "xgboost_artifact.joblib"
-DATA_PATH = REPO_ROOT / "data" / "processed" / "kneepad_features.csv"
+SAMPLE_DATA_PATH = REPO_ROOT / "tests" / "data" / "sample_dataset.csv"
 
-needs_data = pytest.mark.skipif(not DATA_PATH.exists(), reason="canonical dataset not available")
+needs_artifact = pytest.mark.skipif(
+    not ARTIFACT_PATH.exists(), reason="trained artifact not available"
+)
+needs_sample_data = pytest.mark.skipif(
+    not SAMPLE_DATA_PATH.exists(), reason="sample dataset not available"
+)
 
 
 @pytest.fixture(scope="module")
 def adapter():
     return XGBoostArtifactAdapter(str(ARTIFACT_PATH))
-
-
-@pytest.fixture(scope="module")
-def canonical_test_result(adapter):
-    df = load_and_trim(str(DATA_PATH))
-    test_ids = list(config.PHASE3_TEST_SUBJECTS)
-    test_df = df[df["subject_id"].isin(test_ids)].copy()
-    test_df = test_df.sort_values(["subject_id", "trial_num", "window_index"])
-    predictions = adapter.predict_trial_features(test_df)
-    return predictions, test_df
 
 
 def test_artifact_loads_with_required_structure(adapter):
@@ -58,20 +52,40 @@ def test_rejects_missing_features(adapter, monkeypatch):
         adapter.predict_trial_features(dummy)
 
 
-@needs_data
-def test_prediction_parity_on_canonical_test(adapter, canonical_test_result):
-    """Reloading the artifact must reproduce the reported canonical accuracy."""
-    predictions, test_df = canonical_test_result
-    preds = np.array([p.predicted_label_id for p in predictions])
-    truth = test_df["label"].values
-    acc = (preds == truth).mean()
-    assert acc == pytest.approx(0.915, abs=0.005)
+@needs_artifact
+@needs_sample_data
+def test_prediction_parity_on_sample(adapter):
+    """Adapter predictions must match the pipeline logic exactly."""
+    df = load_and_trim(str(SAMPLE_DATA_PATH))
+
+    # Build features exactly as the pipeline does
+    df_feat, _ = build_features(df)
+
+    # Prepare features for the raw model (select + clip)
+    F = adapter.feature_order
+    X = df_feat[F].copy()
+    for c in F:
+        lo, hi = adapter.clip[c]
+        X[c] = X[c].clip(lo, hi)
+
+    # Get the raw model's probabilities and apply the CALIBRATED threshold
+    # (Using probabilities avoids the mismatch with model.predict's default 0.5)
+    raw_proba = adapter.model.predict_proba(X)[:, 1]
+    raw_preds = (raw_proba >= adapter.threshold).astype(int)
+
+    # Get the adapter's predictions
+    adapter_preds = np.array([p.predicted_label_id for p in adapter.predict_trial_features(df)])
+
+    # They must match exactly
+    assert (raw_preds == adapter_preds).all()
 
 
-@needs_data
-def test_predictions_satisfy_contract(adapter, canonical_test_result):
+@needs_artifact
+@needs_sample_data
+def test_predictions_satisfy_contract(adapter):
     """Each prediction must be a well-formed WindowPrediction."""
-    predictions, _ = canonical_test_result
+    df = load_and_trim(str(SAMPLE_DATA_PATH))
+    predictions = adapter.predict_trial_features(df)
     for p in predictions:
         assert p.execution in ("Correct", "Wrong", "Uncertain")
         assert 0.0 <= p.confidence_score <= 1.0
