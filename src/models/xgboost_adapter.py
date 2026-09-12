@@ -41,10 +41,10 @@ class XGBoostArtifactAdapter(InferenceEngine):
         )
         self.artifact = joblib.load(artifact_path)
         self.model = self.artifact["model"]
- # Patch for XGBoost pickle compatibility across different environments
+        # Patch for XGBoost pickle compatibility across different environments
         if not hasattr(self.model, "use_label_encoder"):
             self.model.use_label_encoder = False
-            
+
         self.feature_order = list(self.artifact["feature_order"])
         self.clip = self.artifact["clip"]
         self.threshold = float(self.artifact["threshold"])
