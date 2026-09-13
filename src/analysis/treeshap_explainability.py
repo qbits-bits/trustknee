@@ -92,13 +92,14 @@ def main() -> None:
 
     # Plot 3: Per-class (Correct=0, Wrong=1) summary
     for cls_id, cls_name in [(0, "Correct"), (1, "Wrong")]:
+        if shap_values.values.ndim == 3:
+            sv = shap_values.values[..., cls_id]
+        elif cls_id == 1:
+            sv = shap_values.values
+        else:
+            sv = -shap_values.values
         plt.figure(figsize=(10, 8))
-        shap.summary_plot(
-            shap_values[..., cls_id] if shap_values.values.ndim == 3 else shap_values,
-            X,
-            show=False,
-            max_display=15,
-        )
+        shap.summary_plot(sv, X, show=False, max_display=15)
         plt.title(f"Feature Importance for class={cls_name}", fontsize=14)
         plt.tight_layout()
         plt.savefig(
