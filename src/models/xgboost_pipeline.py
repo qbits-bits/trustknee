@@ -9,36 +9,31 @@ Moves the exact Phase-2 experiment into a repository module:
     plus a full JSON config for reproducibility
 
 Run from the repo root:
-    python src/models/xgboost_pipeline.py            # canonical Phase-3 split
-    python src/models/xgboost_pipeline.py --legacy   # Phase-2 split
+    python -m src.models.xgboost_pipeline --data-root data/raw
+    python -m src.models.xgboost_pipeline --legacy   # Phase-2 split
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
-# Allow `from src import config` when this file is run as a plain script.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-import joblib  # noqa: E402
-import numpy as np  # noqa: E402
-import pandas as pd  # noqa: E402
-import xgboost as xgb  # noqa: E402
-from imblearn.over_sampling import SMOTE  # noqa: E402
-from sklearn.metrics import (  # noqa: E402
+import joblib
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from imblearn.over_sampling import SMOTE
+from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
     confusion_matrix,
     f1_score,
     precision_recall_fscore_support,
 )
 
-from src import config  # noqa: E402
+from src import config
 
 EPS = 1e-9
 SEED = 42
@@ -48,11 +43,13 @@ ID_COLS = [
     "end_time_s",
     "subject_id",
     "trial_num",
+    "trial_id",
     "label_id",
     "exercise",
     "execution",
     "label",
 ]
+TRIAL_GROUP_COLUMNS = ["subject_id", "label_id", "trial_num"]
 ENG_PATTERNS = [
     "sym_ratio",
     "ctrl_ratio",
@@ -107,13 +104,33 @@ MODEL_CONFIGS = {
 
 
 # ---------------------------------------------------------------- load / trim
-def load_and_trim(path):
-    df = pd.read_csv(path)
+def trim_trial_edges(df):
+    """Label and remove two boundary windows from each physical trial."""
+    df = df.copy()
     df["label"] = df["label_id"].apply(lambda x: 0 if x in [0, 3, 6] else 1)
-    df = df.sort_values(["subject_id", "trial_num", "window_index"])
-    pos = df.groupby(["subject_id", "trial_num"]).cumcount()
-    tot = df.groupby(["subject_id", "trial_num"])["window_index"].transform("count")
+    df = df.sort_values([*TRIAL_GROUP_COLUMNS, "window_index"])
+    pos = df.groupby(TRIAL_GROUP_COLUMNS).cumcount()
+    tot = df.groupby(TRIAL_GROUP_COLUMNS)["window_index"].transform("count")
     return df[(pos >= 2) & (pos < tot - 2)].copy()
+
+
+def load_and_trim(path):
+    return trim_trial_edges(pd.read_csv(path))
+
+
+def load_raw_features(data_root):
+    """Build the existing window-feature table directly from prepared raw data."""
+    from src.ingestion import build_manifest
+    from src.models.model_data import build_model_inputs
+
+    dataset = build_model_inputs(build_manifest(data_root), seed=SEED)
+    return pd.concat(
+        [
+            dataset.metadata.reset_index(drop=True),
+            dataset.xgboost_features.reset_index(drop=True),
+        ],
+        axis=1,
+    )
 
 
 # ------------------------------------------------------------- feature build
@@ -135,18 +152,26 @@ def _sensor_col(df, s, sig_type):
 
 def build_features(df):
     """Exact Phase-2 feature engineering with review fixes. Returns (df, feat_cols)."""
+    required = {*TRIAL_GROUP_COLUMNS, "window_index", "exercise"}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"Feature rows are missing required grouping columns: {missing}")
+    df = df.sort_values([*TRIAL_GROUP_COLUMNS, "window_index"]).copy()
     anchors = {s: {t: _sensor_col(df, s, t) for t in ["emg", "gyro", "acc"]} for s in range(1, 9)}
 
-    # Causal subject calibration: each window is normalized by the running
-    # median of that subject's windows up to and including it (no future data).
+    # Causal subject calibration: a window can use prior windows from the same
+    # subject, but neither the current row nor any future row contributes to
+    # its normalization denominator. Edge windows are trimmed by the caller.
     anchor_cols = [
         anchors[s][t] for s in range(1, 9) for t in ["emg", "gyro", "acc"] if anchors[s][t]
     ]
-    subj_med = (
+    subj_med_including_current = (
         df.groupby("subject_id")[anchor_cols].expanding().median().reset_index(level=0, drop=True)
     )
+    subj_med = subj_med_including_current.groupby(df["subject_id"], sort=False).shift(1)
     for c in anchor_cols:
-        df[c + "_norm"] = df[c] / (subj_med[c] + EPS)
+        denominator = subj_med[c].where(subj_med[c].abs() > EPS).fillna(1.0)
+        df[c + "_norm"] = df[c] / denominator
 
     # base invariants
     for L, R in [(1, 5), (2, 6), (3, 7), (4, 8)]:
@@ -167,7 +192,7 @@ def build_features(df):
         df[f"lrshare_{t}"] = df[left].sum(axis=1) / tt
     ctx = pd.get_dummies(df["exercise"], prefix="ctx", dtype=int)
     df = pd.concat([df, ctx], axis=1)
-    grp = df.groupby(["subject_id", "trial_num"])
+    grp = df.groupby(TRIAL_GROUP_COLUMNS)
 
     # kinematics (delta2 now grouped: no cross-trial contamination)
     for s in range(1, 9):
@@ -176,7 +201,9 @@ def build_features(df):
             if c and c in df.columns:
                 d1 = grp[c].diff().fillna(0)
                 df[c + "_delta1"] = d1
-                df[c + "_delta2"] = d1.groupby([df["subject_id"], df["trial_num"]]).diff().fillna(0)
+                df[c + "_delta2"] = (
+                    d1.groupby([df[column] for column in TRIAL_GROUP_COLUMNS]).diff().fillna(0)
+                )
                 df[c + "_absd1"] = d1.abs()
 
     # trajectory lags
@@ -185,7 +212,7 @@ def build_features(df):
             c = f"{anchors[s][t]}_norm" if anchors[s][t] else None
             if c and c in df.columns:
                 for k in (1, 2, 3, 4):
-                    df[c + f"_lag{k}"] = grp[c].shift(k).bfill()
+                    df[c + f"_lag{k}"] = grp[c].shift(k).fillna(0)
 
     # EMA trends
     def ema(c, span):
@@ -259,6 +286,37 @@ def make_split(df, canonical=None):
 
 
 # -------------------------------------------------------------------- fitting
+def _classification_metrics(labels, probabilities, threshold):
+    predictions = (np.asarray(probabilities) >= threshold).astype(int)
+    p_c, r_c, f_c, support = precision_recall_fscore_support(
+        labels,
+        predictions,
+        labels=[0, 1],
+        average=None,
+        zero_division=0,
+    )
+    return {
+        "accuracy": float(accuracy_score(labels, predictions)),
+        "macro_f1": float(f1_score(labels, predictions, average="macro")),
+        "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)),
+        "per_class_precision": p_c.tolist(),
+        "per_class_recall": r_c.tolist(),
+        "per_class_f1": f_c.tolist(),
+        "support": support.tolist(),
+        "confusion_matrix": confusion_matrix(labels, predictions, labels=[0, 1]).tolist(),
+    }
+
+
+def _trial_probabilities(frame, probabilities):
+    local = frame[[*TRIAL_GROUP_COLUMNS, "label"]].copy()
+    local["probability_wrong"] = np.asarray(probabilities, dtype=float)
+    grouped = local.groupby(TRIAL_GROUP_COLUMNS, sort=True, as_index=False).agg(
+        label=("label", "first"),
+        probability_wrong=("probability_wrong", "mean"),
+    )
+    return grouped["label"].to_numpy(dtype=int), grouped["probability_wrong"].to_numpy()
+
+
 def fit_pipeline(tr, va, te, feat_cols):
     """All leakage-prone steps (clip / SMOTE / selection / calibration) on TRAIN only."""
     lo = tr[feat_cols].quantile(0.01)
@@ -339,17 +397,16 @@ def fit_pipeline(tr, va, te, feat_cols):
         if f > bf1:
             bf1, best_t = f, t
 
+    started = time.perf_counter()
     tp = model.predict_proba(te[F])[:, 1]
-    preds = (tp >= best_t).astype(int)
-    acc = accuracy_score(te["label"], preds)
-    f1 = f1_score(te["label"], preds, average="macro")
-    p_c, r_c, f_c, sup = precision_recall_fscore_support(
-        te["label"],
-        preds,
-        labels=[0, 1],
-        average=None,
-        zero_division=0,
-    )
+    latency_ms = (time.perf_counter() - started) * 1000.0 / len(te)
+    trial_labels, trial_probabilities = _trial_probabilities(te, tp)
+    window_metrics = _classification_metrics(te["label"].to_numpy(), tp, best_t)
+    trial_metrics = _classification_metrics(trial_labels, trial_probabilities, best_t)
+    window_metrics["n_samples"] = int(len(te))
+    window_metrics["inference_latency_ms"] = float(latency_ms)
+    trial_metrics["n_samples"] = int(len(trial_labels))
+    trial_metrics["inference_latency_ms"] = float(latency_ms)
 
     return {
         "model": model,
@@ -359,23 +416,16 @@ def fit_pipeline(tr, va, te, feat_cols):
         "threshold": float(best_t),
         "config_name": best_cfg[1],
         "config": best_cfg[2],
-        "metrics": {
-            "accuracy": float(acc),
-            "macro_f1": float(f1),
-            "per_class_precision": p_c.tolist(),
-            "per_class_recall": r_c.tolist(),
-            "per_class_f1": f_c.tolist(),
-            "support": sup.tolist(),
-            "confusion_matrix": confusion_matrix(te["label"], preds).tolist(),
-        },
+        "metrics": {"window": window_metrics, "trial": trial_metrics},
         "subject_ids": None,  # filled by caller
     }
 
 
 # ------------------------------------------------------------------- artifacts
 def save_artifacts(bundle, out_dir, extra_config):
-    os.makedirs(out_dir, exist_ok=True)
-    art_path = os.path.join(out_dir, "xgboost_artifact.joblib")
+    destination = Path(out_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    art_path = destination / "xgboost_artifact.joblib"
     joblib.dump(
         {k: bundle[k] for k in ["model", "feature_order", "clip", "threshold"]},
         art_path,
@@ -394,11 +444,49 @@ def save_artifacts(bundle, out_dir, extra_config):
             "eps": EPS,
             "label_map": {"0,3,6": 0, "else": 1},
             "smote": {"method": "SMOTE", "random_state": SEED, "train_only": True},
-            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
     )
-    with open(os.path.join(out_dir, "xgboost_config.json"), "w") as f:
-        json.dump(cfg, f, indent=2)
+    (destination / "xgboost_config.json").write_text(
+        json.dumps(cfg, indent=2),
+        encoding="utf-8",
+    )
+    metric_rows = []
+    class_rows = []
+    confusion_rows = []
+    for level, metrics in bundle["metrics"].items():
+        metric_rows.append(
+            {
+                "level": level,
+                "accuracy": metrics["accuracy"],
+                "macro_f1": metrics["macro_f1"],
+                "balanced_accuracy": metrics["balanced_accuracy"],
+                "n_samples": metrics["n_samples"],
+                "inference_latency_ms": metrics["inference_latency_ms"],
+            }
+        )
+        for class_id in (0, 1):
+            class_rows.append(
+                {
+                    "level": level,
+                    "class_id": class_id,
+                    "precision": metrics["per_class_precision"][class_id],
+                    "recall": metrics["per_class_recall"][class_id],
+                    "f1": metrics["per_class_f1"][class_id],
+                    "support": metrics["support"][class_id],
+                }
+            )
+            for predicted_class in (0, 1):
+                confusion_rows.append(
+                    {
+                        "level": level,
+                        "true_class": class_id,
+                        "predicted_class": predicted_class,
+                        "count": metrics["confusion_matrix"][class_id][predicted_class],
+                    }
+                )
+    pd.DataFrame(metric_rows).to_csv(destination / "xgboost_metrics.csv", index=False)
+    pd.DataFrame(class_rows).to_csv(destination / "xgboost_per_class_metrics.csv", index=False)
+    pd.DataFrame(confusion_rows).to_csv(destination / "xgboost_confusion_matrices.csv", index=False)
     return art_path
 
 
@@ -430,6 +518,11 @@ def main():
         description="Reproducible Phase-2/3 XGBoost pipeline",
     )
     ap.add_argument("--data", default="data/processed/kneepad_features.csv")
+    ap.add_argument(
+        "--data-root",
+        type=Path,
+        help="build features directly from the prepared raw dataset instead of --data",
+    )
     ap.add_argument("--out", default=None)
     ap.add_argument(
         "--legacy", action="store_true", help="use original Phase-2 seeded 70/15/15 split"
@@ -440,7 +533,11 @@ def main():
     )
 
     t0 = time.time()
-    df = load_and_trim(args.data)
+    df = (
+        trim_trial_edges(load_raw_features(args.data_root))
+        if args.data_root is not None
+        else load_and_trim(args.data)
+    )
     df, feat_cols = build_features(df)
 
     if args.legacy:
@@ -457,7 +554,7 @@ def main():
     bundle = fit_pipeline(tr, va, te, feat_cols)
     bundle["subject_ids"] = ids
 
-    m = bundle["metrics"]
+    m = bundle["metrics"]["window"]
     print("=" * 70)
     print(f" SPLIT: {split_name}")
     print(f" ACCURACY : {m['accuracy'] * 100:.1f}%   MACRO-F1 : {m['macro_f1'] * 100:.1f}%")

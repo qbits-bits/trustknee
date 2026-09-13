@@ -242,3 +242,24 @@ def test_quick_phase3_run_writes_calibration_explanations_and_artifacts(tmp_path
         assert (output / filename).exists()
     explanations = json.loads((output / "integrated_gradients.json").read_text())
     assert explanations
+
+
+def test_phase3_can_reuse_a_prepared_dataset(tmp_path):
+    from src.ingestion import build_manifest
+    from src.models.model_data import build_model_inputs
+
+    _write_phase3_dataset(tmp_path)
+    manifest = build_manifest(tmp_path, exclude_subjects=set())
+    prepared = build_model_inputs(manifest, preprocess=False)
+
+    results = run_phase3_transformer(
+        manifest,
+        tmp_path / "prepared-results",
+        protocol=CANONICAL_PROTOCOL,
+        quick=True,
+        explanation_steps=2,
+        explanations_per_class=1,
+        prepared_dataset=prepared,
+    )
+
+    assert not results.empty

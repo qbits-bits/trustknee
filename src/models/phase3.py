@@ -269,16 +269,26 @@ def run_phase3_transformer(
     active_sensors: tuple[int, ...] | None = None,
     explanation_steps: int = 32,
     explanations_per_class: int = 2,
+    prepared_dataset: ModelDataset | None = None,
 ) -> pd.DataFrame:
     """Train, calibrate, explain, and evaluate the Phase 3 Transformer."""
+    if explanation_steps <= 0 or explanations_per_class <= 0:
+        raise ValueError("explanation_steps and explanations_per_class must be positive")
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
     contract = get_canonical_contract()
     selected = set(contract.train_subjects + contract.val_subjects + contract.test_subjects)
-    evaluation_manifest = manifest[manifest["subject_id"].astype(int).isin(selected)].reset_index(
-        drop=True
-    )
-    dataset = build_model_inputs(evaluation_manifest, overlap=protocol.overlap, seed=seed)
+    if prepared_dataset is None:
+        evaluation_manifest = manifest[
+            manifest["subject_id"].astype(int).isin(selected)
+        ].reset_index(drop=True)
+        dataset = build_model_inputs(evaluation_manifest, overlap=protocol.overlap, seed=seed)
+    else:
+        prepared_subjects = prepared_dataset.metadata["subject_id"].astype(int)
+        indices = np.flatnonzero(prepared_subjects.isin(selected).to_numpy())
+        if not len(indices):
+            raise ValueError("prepared_dataset contains no subjects from the evaluation contract")
+        dataset = prepared_dataset.subset(indices)
     dataset = _trim_trial_edges(dataset, protocol.trim_edge_windows)
     train_indices, validation_indices, test_indices = fixed_subject_split(
         dataset.metadata,

@@ -128,17 +128,18 @@ def replay_trial_pipeline(
         if generate_feedback and window_preds:
             if trial_pred.is_flagged_uncertain:
                 feedback_text = (
-                    "Movement could not be classified with high confidence. "
-                    "Please ensure sensor placement is secure and repeat the movement."
+                    "The model is not confident enough to classify this movement. Check sensor "
+                    "placement and repeat only if that agrees with the clinician-provided plan."
                 )
             elif trial_pred.execution == "Correct":
                 feedback_text = (
-                    f"Good execution of {trial_pred.exercise or 'exercise'}. Form was symmetric."
+                    "The model classified this recorded movement as correct. Treat this as a "
+                    "software result, not clinical confirmation; continue to follow clinician guidance."
                 )
             else:
                 feedback_text = (
-                    f"Compensatory movement pattern detected during {trial_pred.exercise or 'exercise'}. "
-                    "Focus on controlled symmetry and full range of motion."
+                    "The model detected a pattern associated with an incorrect execution label. "
+                    "Do not change the exercise independently; review it with a clinician."
                 )
 
         persisted_trial_id = database_manager.persist_replay_trial(
