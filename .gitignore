@@ -10,6 +10,7 @@ data/interim/*
 data/processed/*
 data/metadata/*
 !data/**/.gitkeep
+src/config/*
 
 # this repo's docs/ holds real deliverables (ER diagram + generator),
 # override the global excludesfile's blanket docs/ ignore

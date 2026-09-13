@@ -113,7 +113,7 @@ def load_and_trim(path):
     df = df.sort_values(["subject_id", "trial_num", "window_index"])
     pos = df.groupby(["subject_id", "trial_num"]).cumcount()
     tot = df.groupby(["subject_id", "trial_num"])["window_index"].transform("count")
-    return df[(pos >= 2) & (pos < tot - 2)].copy()
+    return df[(pos >= 2) & (pos < tot.sub(2))].copy()
 
 
 # ------------------------------------------------------------- feature build
