@@ -158,35 +158,61 @@ def fit_transformer(
 
 
 def predict_transformer(
-    model: Any, sequences: np.ndarray, normalizer: SequenceNormalizer, batch_size: int = 256
+    model: Any,
+    sequences: np.ndarray,
+    normalizer: SequenceNormalizer,
+    batch_size: int = 256,
+    active_sensors: tuple[int, ...] | None = None,
 ) -> np.ndarray:
     """Return finite softmax probabilities for all supplied sequences."""
+    logits = predict_transformer_logits(
+        model,
+        sequences,
+        normalizer,
+        batch_size=batch_size,
+        active_sensors=active_sensors,
+    )
+    if not len(logits):
+        return logits
+    shifted = logits - logits.max(axis=1, keepdims=True)
+    exponentials = np.exp(shifted)
+    return (exponentials / exponentials.sum(axis=1, keepdims=True)).astype(np.float32)
+
+
+def predict_transformer_logits(
+    model: Any,
+    sequences: np.ndarray,
+    normalizer: SequenceNormalizer,
+    batch_size: int = 256,
+    active_sensors: tuple[int, ...] | None = None,
+) -> np.ndarray:
+    """Return finite pre-softmax logits for calibration and attribution."""
     import torch
     from torch.utils.data import DataLoader, TensorDataset
 
     values = normalizer.transform(sequences)
+    if active_sensors is not None:
+        from src.models.explainability import apply_sensor_mask
+
+        values = apply_sensor_mask(values, active_sensors)
     loader = DataLoader(
         TensorDataset(torch.from_numpy(values)),
         batch_size=batch_size,
         shuffle=False,
         pin_memory=next(model.parameters()).device.type == "cuda",
     )
-    probabilities = []
+    logits = []
     model.eval()
     model_device = next(model.parameters()).device
     use_cuda = model_device.type == "cuda"
     with torch.no_grad():
         for (batch_x,) in loader:
-            probabilities.append(
-                torch.softmax(model(batch_x.to(model_device, non_blocking=use_cuda)), dim=1)
-                .cpu()
-                .numpy()
-            )
-    if not probabilities:
+            logits.append(model(batch_x.to(model_device, non_blocking=use_cuda)).cpu().numpy())
+    if not logits:
         return np.empty((0, model.classifier.out_features), dtype=np.float32)
-    result = np.concatenate(probabilities, axis=0).astype(np.float32)
+    result = np.concatenate(logits, axis=0).astype(np.float32)
     if not np.all(np.isfinite(result)):
-        raise ValueError("Transformer produced non-finite probabilities")
+        raise ValueError("Transformer produced non-finite logits")
     return result
 
 

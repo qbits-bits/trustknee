@@ -199,6 +199,18 @@ class InferenceEngine(ABC):
             execution = "Uncertain" if is_uncertain else (info.execution if info else "Unknown")
             exercise = info.exercise if info else None
 
+        sensor_totals: dict[str, float] = {}
+        for prediction in window_predictions:
+            for sensor, attribution in (prediction.feature_attributions or {}).items():
+                sensor_totals[sensor] = sensor_totals.get(sensor, 0.0) + abs(float(attribution))
+        top_sensors = [
+            sensor
+            for sensor, total in sorted(
+                sensor_totals.items(), key=lambda item: item[1], reverse=True
+            )
+            if total > 0.0
+        ][:3]
+
         return TrialPrediction(
             subject_id=subject_id,
             label_id=predicted_label_id,
@@ -212,4 +224,5 @@ class InferenceEngine(ABC):
             exercise=exercise,
             model_name=model_name,
             window_predictions=window_predictions,
+            top_contributing_sensors=top_sensors or None,
         )

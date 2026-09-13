@@ -43,9 +43,38 @@ def __getattr__(name: str):
         from src.models.evaluation import run_fixed_split_comparison
 
         return run_fixed_split_comparison
+    if name in {"TemperatureScaler", "compute_calibration_metrics", "select_uncertainty_threshold"}:
+        from src.models.calibration import (
+            TemperatureScaler,
+            compute_calibration_metrics,
+            select_uncertainty_threshold,
+        )
+
+        return {
+            "TemperatureScaler": TemperatureScaler,
+            "compute_calibration_metrics": compute_calibration_metrics,
+            "select_uncertainty_threshold": select_uncertainty_threshold,
+        }[name]
+    if name == "integrated_gradients":
+        from src.models.explainability import integrated_gradients
+
+        return integrated_gradients
+    if name == "run_phase3_transformer":
+        from src.models.phase3 import run_phase3_transformer
+
+        return run_phase3_transformer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__.append("TransformerEncoderClassifier")
 __all__.append("run_loso_comparison")
 __all__.append("run_fixed_split_comparison")
+__all__.extend(
+    [
+        "TemperatureScaler",
+        "compute_calibration_metrics",
+        "integrated_gradients",
+        "run_phase3_transformer",
+        "select_uncertainty_threshold",
+    ]
+)

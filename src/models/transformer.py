@@ -58,6 +58,16 @@ class TransformerEncoderClassifier(nn.Module):
             raise ValueError("input_dim must be positive and num_classes must be at least 2")
         if d_model % nhead:
             raise ValueError("d_model must be divisible by nhead")
+        self.model_config = {
+            "input_dim": int(input_dim),
+            "num_classes": int(num_classes),
+            "d_model": int(d_model),
+            "nhead": int(nhead),
+            "num_layers": int(num_layers),
+            "dim_feedforward": int(dim_feedforward),
+            "dropout": float(dropout),
+            "max_seq_len": int(max_seq_len),
+        }
         self.input_projection = nn.Linear(input_dim, d_model)
         self.positional_encoding = SinusoidalPositionalEncoding(d_model, max_seq_len)
         encoder_layer = nn.TransformerEncoderLayer(

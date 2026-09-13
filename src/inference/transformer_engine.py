@@ -9,6 +9,12 @@ import numpy as np
 
 from src import config
 from src.inference.base import InferenceEngine, WindowPrediction
+from src.models.explainability import (
+    apply_sensor_mask,
+    integrated_gradients,
+    sensor_feature_mask,
+    summarize_sensor_attributions,
+)
 from src.models.model_data import make_transformer_sequences
 from src.models.normalization import SequenceNormalizer
 
@@ -26,6 +32,9 @@ class TransformerInferenceEngine(InferenceEngine):
         temperature: float = 1.0,
         uncertainty_threshold: float = 0.60,
         device: str = "cpu",
+        active_sensors: tuple[int, ...] | None = None,
+        explain: bool = False,
+        explanation_steps: int = 32,
     ) -> None:
         super().__init__(
             model_name="transformer",
@@ -36,6 +45,14 @@ class TransformerInferenceEngine(InferenceEngine):
         self.normalizer = normalizer
         self.temperature = max(1e-4, float(temperature))
         self.device = device
+        self.active_sensors = active_sensors
+        self.explain = bool(explain)
+        self.explanation_steps = int(explanation_steps)
+        if self.explanation_steps <= 0:
+            raise ValueError("explanation_steps must be positive")
+        move_to_device = getattr(self.model, "to", None)
+        if callable(move_to_device):
+            move_to_device(device)
         self.model.eval()
 
     def predict_window(
@@ -56,6 +73,10 @@ class TransformerInferenceEngine(InferenceEngine):
 
         seq = make_transformer_sequences(imu_batch, emg_batch)
         norm_seq = self.normalizer.transform(seq)
+        feature_mask = None
+        if self.active_sensors is not None:
+            feature_mask = sensor_feature_mask(self.active_sensors)
+            norm_seq = apply_sensor_mask(norm_seq, self.active_sensors)
 
         tensor_x = torch.from_numpy(norm_seq).to(self.device)
         with torch.no_grad():
@@ -77,6 +98,20 @@ class TransformerInferenceEngine(InferenceEngine):
             execution = "Uncertain" if is_uncertain else (info.execution if info else "Unknown")
             exercise = info.exercise if info else None
 
+        feature_attributions = None
+        if self.explain:
+            attribution = integrated_gradients(
+                self.model,
+                norm_seq,
+                np.array([predicted_label_id]),
+                steps=self.explanation_steps,
+                feature_mask=feature_mask,
+            )[0]
+            feature_attributions = {
+                str(row["sensor_name"]): float(row["absolute_attribution"])
+                for row in summarize_sensor_attributions(attribution)
+            }
+
         return WindowPrediction(
             window_index=window_index,
             start_time_s=start_time_s,
@@ -90,4 +125,5 @@ class TransformerInferenceEngine(InferenceEngine):
             model_name=self.model_name,
             subject_id=subject_id,
             trial_num=trial_num,
+            feature_attributions=feature_attributions,
         )
