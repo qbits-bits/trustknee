@@ -1,4 +1,3 @@
-# src/features/masking.py
 import re
 
 import numpy as np
@@ -48,6 +47,13 @@ def apply_sensor_mask_tabular(
                 if L in active_set and R in active_set:
                     allowed_cols.append(col)
                 break
+
+        # Whole-array ratios depend on every sensor through their denominator.
+        # They are valid only for the unpruned eight-sensor feature set.
+        if re.fullmatch(r"lrshare_(?:acc|gyro|emg)", col):
+            if active_set in (set(range(1, 9)), set(range(0, 8))):
+                allowed_cols.append(col)
+            continue
 
         # Ratio features have sensor IDs without the standard "s<ID>" marker.
         ratio_match = re.fullmatch(r"(?:ctrl_ratio|loadshare_(?:acc|gyro|emg))_(\d+)", col)
