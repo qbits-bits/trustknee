@@ -1,25 +1,26 @@
 
-import sys
-from pathlib import Path
 import argparse
 import json
-import time
 import logging
-from joblib import Parallel, delayed
-import pandas as pd
+import sys
+import time
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import xgboost as xgb
 from imblearn.over_sampling import SMOTE
+from joblib import Parallel, delayed
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-    
-from src import config # noqa: E402
-from src.contracts import get_canonical_contract # noqa: E402
-from src.features.masking import apply_sensor_mask_tabular # noqa: E402
-from src.models.trial_aggregation import aggregate_trial_predictions, compute_metrics # noqa: E402
-from src.models.xgboost_pipeline import load_and_trim, build_features, make_split # noqa: E402
+
+from src import config  # noqa: E402
+from src.contracts import get_canonical_contract  # noqa: E402
+from src.features.masking import apply_sensor_mask_tabular  # noqa: E402
+from src.models.trial_aggregation import aggregate_trial_predictions, compute_metrics  # noqa: E402
+from src.models.xgboost_pipeline import build_features, load_and_trim, make_split  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("trustknee.models")
@@ -28,26 +29,26 @@ AGGREGATION_METHODS = ["mean_prob", "majority_vote", "confidence_weighted"]
 
 def evaluate_subset(tr_df, va_df, active_sensors, is_candidate_search=False):
     """Evaluates a sensor subset using masking.py and trial_aggregation.py."""
-    
+
     canonical = get_canonical_contract()
     SEED = canonical.seed
-    
+
     # Apply tabular channel masking from masking.py;
     train_masked = apply_sensor_mask_tabular(tr_df, active_sensors, sensor_column_prefix="s")
     val_masked = apply_sensor_mask_tabular(va_df, active_sensors, sensor_column_prefix="s")
 
     meta_cols = {
-        "window_index", 
-        "start_time_s", 
-        "end_time_s", 
-        "subject_id", 
-        "label_id", 
-        "trial_num", 
-        "execution", 
-        "exercise", 
+        "window_index",
+        "start_time_s",
+        "end_time_s",
+        "subject_id",
+        "label_id",
+        "trial_num",
+        "execution",
+        "exercise",
         "label"
     }
-    
+
     feature_cols = [col for col in train_masked.select_dtypes(include=[np.number]).columns if col not in meta_cols]
 
     # Train-only Quantile Clipping;
@@ -56,7 +57,7 @@ def evaluate_subset(tr_df, va_df, active_sensors, is_candidate_search=False):
 
     X_train = train_masked[feature_cols].clip(lo, hi, axis=1)
     y_train = train_masked["label"].values
-    
+
     X_val = val_masked[feature_cols].clip(lo, hi, axis=1)
     y_val = val_masked["label"].values
 
@@ -77,7 +78,7 @@ def evaluate_subset(tr_df, va_df, active_sensors, is_candidate_search=False):
         "min_child_weight": 2,
         "reg_lambda": 1.5,
         "reg_alpha": 0.05,
-        
+
         # Execution options;
         "tree_method": "hist",
         "random_state": SEED,
@@ -106,8 +107,15 @@ def evaluate_subset(tr_df, va_df, active_sensors, is_candidate_search=False):
     opt_win_preds = (val_probs_pos >= best_t).astype(int)
     win_metrics = compute_metrics(np.asarray(y_val), np.asarray(opt_win_preds))
 
-    # Trial-Level Aggregation Evaluation via trial_aggregation.py;
-    va_trial_ids = (val_masked["subject_id"].astype(str) + "_" + val_masked["trial_num"].astype(str)).values
+    # Trial numbers restart per subject and label directory, so label_id is part
+    # of the trial key to prevent aggregating distinct physical trials together.
+    va_trial_ids = (
+        val_masked["subject_id"].astype(str)
+        + "_"
+        + val_masked["label_id"].astype(str)
+        + "_"
+        + val_masked["trial_num"].astype(str)
+    ).values
     # Build ground truth map per unique trial;
     unique_trials = np.unique(np.asarray(va_trial_ids, dtype=str))
     y_true_trial = np.array([val_masked[va_trial_ids == tid]["label"].iloc[0] for tid in unique_trials])
@@ -120,7 +128,7 @@ def evaluate_subset(tr_df, va_df, active_sensors, is_candidate_search=False):
     for method in AGGREGATION_METHODS:
         pred_dict = aggregate_trial_predictions(val_probs, np.asarray(va_trial_ids, dtype=str), method=method)
         y_pred_trial = np.array([pred_dict[tid] for tid in unique_trials])
-        
+
         t_metrics = compute_metrics(y_true_trial, y_pred_trial)
         if t_metrics["macro_f1"] > best_trial_f1:
             best_trial_f1 = t_metrics["macro_f1"]
@@ -131,13 +139,13 @@ def evaluate_subset(tr_df, va_df, active_sensors, is_candidate_search=False):
         "feature_count": len(feature_cols),
         "latency_sec": latency_per_sample,
         "best_threshold": best_t,
-        
+
         # Window Metrics;
         "win_acc": win_metrics["accuracy"],
         "win_macro_f1": win_metrics["macro_f1"],
         "win_balanced_acc": win_metrics["balanced_accuracy"],
         "win_per_class_recall": win_metrics["per_class_recall"],
-        
+
         # Trial Metrics;
         "best_agg_method": best_agg_method,
         "trial_acc": best_trial_metrics["accuracy"],
@@ -145,7 +153,7 @@ def evaluate_subset(tr_df, va_df, active_sensors, is_candidate_search=False):
         "trial_balanced_acc": best_trial_metrics["balanced_accuracy"],
         "trial_per_class_recall": best_trial_metrics["per_class_recall"]
     }
-    
+
 def _eval_candidate_worker(sensor_to_drop, current_sensors, train_df, val_df):
     """Worker function for parallel candidate evaluation."""
     candidate = [x for x in current_sensors if x != sensor_to_drop]
@@ -157,12 +165,16 @@ def _eval_candidate_worker(sensor_to_drop, current_sensors, train_df, val_df):
 
 
 def run_sbe_experiment(data_path, min_sensors=2, n_jobs = -1):
+    if not 1 <= min_sensors <= 8:
+        raise ValueError("min_sensors must be between 1 and 8")
+
     logger.info("Loading Data & Generating Engineered Features...")
-    
-    import warnings # noqa: E402
-    from pandas.errors import PerformanceWarning # noqa: E402
+
+    import warnings  # noqa: E402
+
+    from pandas.errors import PerformanceWarning  # noqa: E402
     warnings.filterwarnings("ignore", category=PerformanceWarning) # noqa: E402
-    
+
     df = load_and_trim(data_path)
     df, _ = build_features(df)
 
@@ -214,7 +226,7 @@ def run_sbe_experiment(data_path, min_sensors=2, n_jobs = -1):
 
         if len(current_sensors) == min_sensors:
             break
-        
+
         # Parallel Candidate Evaluation;
         logger.debug(f"Evaluating candidate removals across parallel workers (n_jobs={n_jobs})")
         candidate_evals = Parallel(n_jobs=n_jobs, prefer="threads")(
@@ -233,7 +245,7 @@ def run_sbe_experiment(data_path, min_sensors=2, n_jobs = -1):
         if not valid_candidate_evals:
             logger.warning("No valid candidate evaluations remain; stopping sensor pruning.")
             break
-        
+
         # Select candidate whose removal drops performance the least
         worst_sensor, best_cand_f1 = max(valid_candidate_evals, key=lambda x: x[1])
         logger.info(f"Pruning Sensor {worst_sensor} (Retained Candidate Val F1: {best_cand_f1:.4f})")
@@ -244,16 +256,16 @@ def run_sbe_experiment(data_path, min_sensors=2, n_jobs = -1):
     project_src = Path(__file__).resolve().parents[1]
     config_dir = project_src / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
-    
+
     sbe_results_csv = config_dir / "sbe_sensor_subset_results.csv"
     res_df = pd.DataFrame(results)
     res_df.to_csv(sbe_results_csv, index=False)
     logger.info("Saved SBE Experiment log to sbe_sensor_subset_results.csv")
 
     # Dynamically select the target row: try 4 (or 3), fallback to minimum evaluated;
-    target_count = args.min_sensors if hasattr(args, 'min_sensors') else 3
+    target_count = min_sensors
     matching_subset = res_df[res_df["num_sensors"] == target_count]
-    
+
     if not matching_subset.empty:
         target_row = matching_subset.iloc[0]
     else:
@@ -269,18 +281,18 @@ def run_sbe_experiment(data_path, min_sensors=2, n_jobs = -1):
         eval(raw_sensors) if isinstance(raw_sensors, str) else list(raw_sensors)
     )
     selected_sensors = [int(s) for s in selected_sensors]
-    
+
     # Generate 8-channel boolean mask (handles 0-based [0..7] or 1-based [1..8] indexing);
     is_one_based = any(s == 8 for s in selected_sensors) or not any(s == 0 for s in selected_sensors)
     sensor_range = range(1, 9) if is_one_based else range(0, 8)
     boolean_mask = [bool(i in selected_sensors) for i in sensor_range]
-    
+
     # Performance Retention Check;
     retained_pct = float(target_row["retained_performance_pct"])
     # If retained_pct is logged as a percentage (e.g., 92.5), check >= 90.0;
     # If logged as a decimal fraction (e.g., 0.925), check >= 0.90;
     target_met = retained_pct >= 90.0 if retained_pct > 1.0 else retained_pct >= 0.90
-    
+
     handoff = {
         "num_sensors_selected": int(target_row["num_sensors"]),
         "selected_sensor_ids": selected_sensors,
@@ -291,7 +303,7 @@ def run_sbe_experiment(data_path, min_sensors=2, n_jobs = -1):
         "val_window_macro_f1": float(target_row["win_macro_f1"]),
         "val_trial_macro_f1": float(target_row["trial_macro_f1"])
     }
-        
+
     handoff_json = config_dir / "sensor_selection_handoff.json"
     with open(handoff_json, "w") as f:
         json.dump(handoff, f, indent=4)
@@ -302,23 +314,24 @@ if __name__ == "__main__":
     project_root = Path(__file__).resolve().parents[2]
     data_dir = project_root / "data" / "processed"
     data_csv = data_dir / "kneepad_features.csv"
-    
+
     parser = argparse.ArgumentParser(description="SBE Sensor Selection")
     parser.add_argument(
-        "--min-sensors", 
-        type=int, 
-        default=2, 
+        "--min-sensors",
+        type=int,
+        default=2,
+        choices=range(1, 9),
         help="Minimum number of sensors to eliminate down to (default: 2)."
     )
     parser.add_argument(
-            "--n-jobs", 
-            type=int, 
-            default=-1, 
+            "--n-jobs",
+            type=int,
+            default=-1,
             help="Number of CPU cores for parallel evaluation (-1 uses all cores)."
         )
     args = parser.parse_args()
     run_sbe_experiment(
-        data_path=data_csv, 
-        min_sensors=args.min_sensors, 
+        data_path=data_csv,
+        min_sensors=args.min_sensors,
         n_jobs=args.n_jobs
     )
