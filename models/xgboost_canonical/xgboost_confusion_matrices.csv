@@ -1,0 +1,9 @@
+level,true_class,predicted_class,count
+window,0,0,3383
+window,0,1,1593
+window,1,0,2090
+window,1,1,6066
+trial,0,0,114
+trial,0,1,36
+trial,1,0,64
+trial,1,1,148
