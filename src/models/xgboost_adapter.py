@@ -156,9 +156,10 @@ class XGBoostArtifactAdapter(InferenceEngine):
 
         Args:
             raw_df: DataFrame of raw sensor columns for one or more subjects,
-                sorted by [subject_id, trial_num, window_index]. Must include
-                the full window history for each subject so causal calibration
-                and temporal features match training.
+                with an opaque trial_id and sorted by window_index. A single
+                unlabelled trial may omit trial_id when subject_id and
+                trial_num identify it. Must include the full window history
+                for each trial so causal features match training.
 
         Returns:
             A list of WindowPrediction objects, one per input row.

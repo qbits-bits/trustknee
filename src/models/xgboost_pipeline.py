@@ -49,7 +49,7 @@ ID_COLS = [
     "execution",
     "label",
 ]
-TRIAL_GROUP_COLUMNS = ["subject_id", "label_id", "trial_num"]
+TRIAL_GROUP_COLUMNS = ["subject_id", "trial_id"]
 ENG_PATTERNS = [
     "sym_ratio",
     "ctrl_ratio",
@@ -104,9 +104,43 @@ MODEL_CONFIGS = {
 
 
 # ---------------------------------------------------------------- load / trim
+def _ensure_trial_id(df):
+    """Return a copy with an opaque, label-independent grouping key available."""
+    local = df.copy()
+    if "trial_id" in local.columns:
+        if local["trial_id"].isna().any():
+            raise ValueError("trial_id must not contain missing values")
+        return local
+    required = {"subject_id", "trial_num"}
+    missing = sorted(required - set(local.columns))
+    if missing:
+        raise ValueError(f"Feature rows are missing trial identity columns: {missing}")
+    if "label_id" in local.columns:
+        # Backward-compatible conversion for labelled training CSVs. The
+        # resulting value is used only as an opaque group ID; label_id is not
+        # read by feature construction after this conversion.
+        local["trial_id"] = [
+            f"subject_{subject}_label_{label}_trial_{trial}"
+            for subject, label, trial in zip(
+                local["subject_id"], local["label_id"], local["trial_num"], strict=True
+            )
+        ]
+    else:
+        identity = ["subject_id", "trial_num"]
+        if "window_index" in local.columns and local.duplicated([*identity, "window_index"]).any():
+            raise ValueError(
+                "Unlabelled input containing repeated subject/trial/window keys must provide trial_id"
+            )
+        local["trial_id"] = [
+            f"inference_subject_{subject}_trial_{trial}"
+            for subject, trial in zip(local["subject_id"], local["trial_num"], strict=True)
+        ]
+    return local
+
+
 def trim_trial_edges(df):
     """Label and remove two boundary windows from each physical trial."""
-    df = df.copy()
+    df = _ensure_trial_id(df)
     df["label"] = df["label_id"].apply(lambda x: 0 if x in [0, 3, 6] else 1)
     df = df.sort_values([*TRIAL_GROUP_COLUMNS, "window_index"])
     pos = df.groupby(TRIAL_GROUP_COLUMNS).cumcount()
@@ -152,25 +186,24 @@ def _sensor_col(df, s, sig_type):
 
 def build_features(df):
     """Exact Phase-2 feature engineering with review fixes. Returns (df, feat_cols)."""
+    df = _ensure_trial_id(df)
     required = {*TRIAL_GROUP_COLUMNS, "window_index", "exercise"}
     missing = sorted(required - set(df.columns))
     if missing:
         raise ValueError(f"Feature rows are missing required grouping columns: {missing}")
     df = df.sort_values([*TRIAL_GROUP_COLUMNS, "window_index"]).copy()
+    grp = df.groupby(TRIAL_GROUP_COLUMNS, sort=False)
     anchors = {s: {t: _sensor_col(df, s, t) for t in ["emg", "gyro", "acc"]} for s in range(1, 9)}
 
-    # Causal subject calibration: a window can use prior windows from the same
-    # subject, but neither the current row nor any future row contributes to
-    # its normalization denominator. Edge windows are trimmed by the caller.
+    # Causal trial calibration: a window uses only prior windows from the same
+    # opaque physical trial. Ground-truth labels and future/current values do
+    # not influence this normalization.
     anchor_cols = [
         anchors[s][t] for s in range(1, 9) for t in ["emg", "gyro", "acc"] if anchors[s][t]
     ]
-    subj_med_including_current = (
-        df.groupby("subject_id")[anchor_cols].expanding().median().reset_index(level=0, drop=True)
-    )
-    subj_med = subj_med_including_current.groupby(df["subject_id"], sort=False).shift(1)
     for c in anchor_cols:
-        denominator = subj_med[c].where(subj_med[c].abs() > EPS).fillna(1.0)
+        prior_median = grp[c].transform(lambda values: values.expanding().median().shift(1))
+        denominator = prior_median.where(prior_median.abs() > EPS).fillna(1.0)
         df[c + "_norm"] = df[c] / denominator
 
     # base invariants
@@ -192,7 +225,7 @@ def build_features(df):
         df[f"lrshare_{t}"] = df[left].sum(axis=1) / tt
     ctx = pd.get_dummies(df["exercise"], prefix="ctx", dtype=int)
     df = pd.concat([df, ctx], axis=1)
-    grp = df.groupby(TRIAL_GROUP_COLUMNS)
+    grp = df.groupby(TRIAL_GROUP_COLUMNS, sort=False)
 
     # kinematics (delta2 now grouped: no cross-trial contamination)
     for s in range(1, 9):
@@ -202,7 +235,9 @@ def build_features(df):
                 d1 = grp[c].diff().fillna(0)
                 df[c + "_delta1"] = d1
                 df[c + "_delta2"] = (
-                    d1.groupby([df[column] for column in TRIAL_GROUP_COLUMNS]).diff().fillna(0)
+                    d1.groupby([df[column] for column in TRIAL_GROUP_COLUMNS], sort=False)
+                    .diff()
+                    .fillna(0)
                 )
                 df[c + "_absd1"] = d1.abs()
 
@@ -308,7 +343,7 @@ def _classification_metrics(labels, probabilities, threshold):
 
 
 def _trial_probabilities(frame, probabilities):
-    local = frame[[*TRIAL_GROUP_COLUMNS, "label"]].copy()
+    local = _ensure_trial_id(frame)[[*TRIAL_GROUP_COLUMNS, "label"]].copy()
     local["probability_wrong"] = np.asarray(probabilities, dtype=float)
     grouped = local.groupby(TRIAL_GROUP_COLUMNS, sort=True, as_index=False).agg(
         label=("label", "first"),

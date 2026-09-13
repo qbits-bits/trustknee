@@ -17,6 +17,21 @@ MODEL_SEQUENCE_LENGTH = 30
 MODEL_INPUT_DIM = 56
 
 
+@dataclass(frozen=True)
+class DatasetPreparation:
+    """Settings that determine the exact windows contained in a model dataset."""
+
+    window_ms: float
+    overlap: float
+    preprocess: bool
+    augment_minority: bool
+    target_labels: tuple[int, ...]
+    aug_methods: tuple[str, ...]
+    aug_multiplier: int
+    exclude_subjects: tuple[int, ...]
+    seed: int
+
+
 @dataclass
 class ModelDataset:
     """Aligned sequence, tabular, target, and grouping data for an experiment."""
@@ -26,6 +41,7 @@ class ModelDataset:
     labels_9: np.ndarray
     labels_binary: np.ndarray
     metadata: pd.DataFrame  # IDs/timestamps used for grouping and reporting only
+    preparation: DatasetPreparation | None = None
 
     def __post_init__(self) -> None:
         n_samples = len(self.transformer_sequences)
@@ -83,6 +99,7 @@ class ModelDataset:
             labels_9=self.labels_9[indices],
             labels_binary=self.labels_binary[indices],
             metadata=self.metadata.iloc[indices].reset_index(drop=True),
+            preparation=self.preparation,
         )
 
 
@@ -285,4 +302,16 @@ def build_model_inputs(
             preprocess=preprocess,
             skip_corrupt=True,
         )
-    return build_model_inputs_from_trials(trials)
+    dataset = build_model_inputs_from_trials(trials)
+    dataset.preparation = DatasetPreparation(
+        window_ms=float(window_ms),
+        overlap=float(overlap),
+        preprocess=bool(preprocess),
+        augment_minority=bool(augment_minority),
+        target_labels=tuple(int(label) for label in target_labels),
+        aug_methods=tuple(str(method) for method in aug_methods),
+        aug_multiplier=int(aug_multiplier),
+        exclude_subjects=tuple(sorted(int(subject) for subject in (exclude_subjects or set()))),
+        seed=int(seed),
+    )
+    return dataset

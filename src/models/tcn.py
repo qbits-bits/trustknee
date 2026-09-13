@@ -63,30 +63,34 @@ class TemporalConvNetClassifier(nn.Module):
             "kernel_size": kernel_size,
             "dropout": dropout,
         }
-        self.network = nn.Sequential(
-            nn.Conv1d(input_dim, hidden_dim, kernel_size, padding=kernel_size // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Conv1d(
-                hidden_dim,
-                hidden_dim,
-                kernel_size,
-                padding=kernel_size - 1,
-                dilation=2,
-            ),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+        self.first_conv = nn.Conv1d(input_dim, hidden_dim, kernel_size, padding=kernel_size // 2)
+        self.second_conv = nn.Conv1d(
+            hidden_dim,
+            hidden_dim,
+            kernel_size,
+            padding=kernel_size - 1,
+            dilation=2,
         )
+        self.activation = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, values, mask=None):
-        encoded = self.network(values)
         if mask is None:
-            pooled = encoded.mean(dim=-1)
+            valid = None
         else:
             if mask.shape != (values.shape[0], values.shape[-1]):
                 raise ValueError("mask must have shape (batch_size, sequence_length)")
-            valid = mask.to(encoded.device, dtype=encoded.dtype).unsqueeze(1)
+            valid = mask.to(values.device, dtype=values.dtype).unsqueeze(1)
+            values = values * valid
+        encoded = self.dropout(self.activation(self.first_conv(values)))
+        if valid is not None:
+            encoded = encoded * valid
+        encoded = self.dropout(self.activation(self.second_conv(encoded)))
+        if valid is None:
+            pooled = encoded.mean(dim=-1)
+        else:
+            encoded = encoded * valid
             pooled = (encoded * valid).sum(dim=-1) / valid.sum(dim=-1).clamp_min(1.0)
         return self.classifier(pooled)
 

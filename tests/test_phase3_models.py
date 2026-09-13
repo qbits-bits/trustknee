@@ -250,7 +250,7 @@ def test_phase3_can_reuse_a_prepared_dataset(tmp_path):
 
     _write_phase3_dataset(tmp_path)
     manifest = build_manifest(tmp_path, exclude_subjects=set())
-    prepared = build_model_inputs(manifest, preprocess=False)
+    prepared = build_model_inputs(manifest, preprocess=True)
 
     results = run_phase3_transformer(
         manifest,
@@ -263,3 +263,23 @@ def test_phase3_can_reuse_a_prepared_dataset(tmp_path):
     )
 
     assert not results.empty
+
+
+def test_phase3_rejects_prepared_dataset_with_incompatible_protocol(tmp_path):
+    from src.ingestion import build_manifest
+    from src.models.model_data import build_model_inputs
+
+    _write_phase3_dataset(tmp_path)
+    manifest = build_manifest(tmp_path, exclude_subjects=set())
+    prepared = build_model_inputs(manifest, preprocess=False)
+
+    with pytest.raises(ValueError, match="incompatible.*preprocess=False"):
+        run_phase3_transformer(
+            manifest,
+            tmp_path / "invalid-prepared-results",
+            protocol=CANONICAL_PROTOCOL,
+            quick=True,
+            explanation_steps=2,
+            explanations_per_class=1,
+            prepared_dataset=prepared,
+        )

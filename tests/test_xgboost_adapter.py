@@ -144,13 +144,27 @@ def test_temporal_features_are_causal_and_isolated_by_full_trial_key():
     first, _ = build_features(original)
     second, _ = build_features(changed_future)
     earlier = (first["label_id"] == 0) & (first["window_index"] < 5)
-    engineered = [column for column in first if column not in original.columns]
+    engineered = [
+        column
+        for column in first
+        if column not in original.columns and pd.api.types.is_numeric_dtype(first[column])
+    ]
 
     assert np.allclose(first.loc[earlier, engineered], second.loc[earlier, engineered])
     lag_column = "s1_acc_z_rms_norm_lag1"
     first_of_each_label = first.groupby(["subject_id", "label_id", "trial_num"]).head(1)
     assert np.all(first_of_each_label[lag_column] == 0.0)
     assert first.iloc[0]["s1_acc_z_rms_norm"] == pytest.approx(first.iloc[0]["s1_acc_z_rms"])
+
+
+def test_feature_construction_accepts_one_unlabelled_trial_without_target_dependency():
+    unlabelled = _temporal_feature_rows().query("label_id == 0").drop(columns="label_id")
+
+    features, columns = build_features(unlabelled)
+
+    assert columns
+    assert features["trial_id"].nunique() == 1
+    assert "label_id" not in features
 
 
 def test_edge_trimming_does_not_merge_equal_trial_numbers_across_labels(tmp_path):

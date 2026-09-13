@@ -134,7 +134,9 @@ def _evaluate_subset(
         seed=seed,
         training_config=training_config,
     )
+    prediction_started = time.perf_counter()
     probabilities = predict_xgboost(model, features.iloc[evaluation_indices], 2)
+    inference_elapsed = time.perf_counter() - prediction_started
     elapsed = time.perf_counter() - started
     window_metrics = _metrics(labels[evaluation_indices], probabilities)
     methods = (aggregation_method,) if aggregation_method else AGGREGATION_METHODS
@@ -161,7 +163,7 @@ def _evaluate_subset(
         "feature_count": features.shape[1],
         "aggregation_method": selected_method,
         "fit_predict_seconds": elapsed,
-        "latency_ms_per_window": elapsed * 1000.0 / len(evaluation_indices),
+        "latency_ms_per_window": inference_elapsed * 1000.0 / len(evaluation_indices),
     }
     result.update({f"window_{key}": value for key, value in window_metrics.items()})
     result.update({f"trial_{key}": value for key, value in trial_metrics.items()})

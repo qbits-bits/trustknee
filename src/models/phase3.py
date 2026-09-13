@@ -284,6 +284,25 @@ def run_phase3_transformer(
         ].reset_index(drop=True)
         dataset = build_model_inputs(evaluation_manifest, overlap=protocol.overlap, seed=seed)
     else:
+        preparation = prepared_dataset.preparation
+        if preparation is None:
+            raise ValueError("prepared_dataset is missing preparation settings")
+        mismatches = []
+        if not np.isclose(preparation.window_ms, config.WINDOW_MS):
+            mismatches.append(f"window_ms={preparation.window_ms}")
+        if not np.isclose(preparation.overlap, protocol.overlap):
+            mismatches.append(f"overlap={preparation.overlap}")
+        if not preparation.preprocess:
+            mismatches.append("preprocess=False")
+        if preparation.augment_minority:
+            mismatches.append("augment_minority=True")
+        if preparation.seed != seed:
+            mismatches.append(f"seed={preparation.seed}")
+        if mismatches:
+            raise ValueError(
+                "prepared_dataset is incompatible with the requested protocol: "
+                + ", ".join(mismatches)
+            )
         prepared_subjects = prepared_dataset.metadata["subject_id"].astype(int)
         indices = np.flatnonzero(prepared_subjects.isin(selected).to_numpy())
         if not len(indices):
@@ -317,6 +336,9 @@ def run_phase3_transformer(
         "dataset_fingerprint_sha256": _dataset_fingerprint(dataset, protocol),
         "n_windows": dataset.n_samples,
         "n_trials": int(dataset.metadata["trial_id"].nunique()),
+        "dataset_preparation": (
+            asdict(dataset.preparation) if dataset.preparation is not None else None
+        ),
     }
     _write_json(configuration, destination / "config.json")
 

@@ -32,6 +32,24 @@ def test_tcn_rejects_even_kernel_that_changes_temporal_length():
         TemporalConvNetClassifier(kernel_size=2)
 
 
+def test_tcn_prediction_is_invariant_to_other_trials_padding_length():
+    import torch
+
+    torch.manual_seed(3)
+    model = TemporalConvNetClassifier(num_classes=2, dropout=0.0).eval()
+    short = torch.randn(1, 56, 5)
+    short_mask = torch.ones(1, 5, dtype=torch.bool)
+    with torch.no_grad():
+        alone = model(short, short_mask)
+        mixed_values = torch.zeros(2, 56, 9)
+        mixed_values[0, :, :5] = short[0]
+        mixed_values[1] = torch.randn(56, 9)
+        mixed_mask = torch.arange(9)[None, :] < torch.tensor([5, 9])[:, None]
+        mixed = model(mixed_values, mixed_mask)[0:1]
+
+    assert torch.allclose(alone, mixed, atol=1e-6)
+
+
 def test_full_trial_conversion_preserves_variable_window_counts():
     dataset = _synthetic_dataset()
     extra_index = 0
