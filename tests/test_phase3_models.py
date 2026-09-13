@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from src import config
+from src.inference.mock_engine import MockInferenceEngine
 from src.models.artifacts import load_transformer_artifact, save_transformer_artifact
 from src.models.calibration import (
     TemperatureScaler,
@@ -117,6 +119,25 @@ def test_sensor_attribution_summary_uses_physical_sensor_names():
     assert summary[0]["top_channel"] == "acc_x"
     assert summary[0]["peak_time_ms"] > 0
     assert sum(float(row["attribution_fraction"]) for row in summary) == pytest.approx(1.0)
+
+
+def test_trial_explanation_excludes_zero_attribution_masked_sensors():
+    engine = MockInferenceEngine()
+    base = engine.predict_window(
+        np.zeros((8, 6, 30)),
+        np.zeros((8, 252)),
+    )
+    explained = replace(
+        base,
+        feature_attributions={"active sensor": 1.0, "masked sensor": 0.0},
+    )
+    all_zero = replace(
+        base,
+        feature_attributions={"masked sensor": 0.0},
+    )
+
+    assert engine.aggregate_trial([explained]).top_contributing_sensors == ["active sensor"]
+    assert engine.aggregate_trial([all_zero]).top_contributing_sensors is None
 
 
 def test_transformer_artifact_round_trip_preserves_predictions(tmp_path):

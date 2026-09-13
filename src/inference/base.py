@@ -205,10 +205,11 @@ class InferenceEngine(ABC):
                 sensor_totals[sensor] = sensor_totals.get(sensor, 0.0) + abs(float(attribution))
         top_sensors = [
             sensor
-            for sensor, _ in sorted(sensor_totals.items(), key=lambda item: item[1], reverse=True)[
-                :3
-            ]
-        ]
+            for sensor, total in sorted(
+                sensor_totals.items(), key=lambda item: item[1], reverse=True
+            )
+            if total > 0.0
+        ][:3]
 
         return TrialPrediction(
             subject_id=subject_id,
