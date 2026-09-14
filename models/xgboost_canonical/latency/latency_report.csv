@@ -1,0 +1,9 @@
+metric,value
+feature_engineering_ms_per_window,3.4592046070648337
+batch_predict_ms_per_window_mean,0.0176095773658905
+batch_predict_ms_per_window_median,0.017372943951743772
+single_window_predict_ms_mean,48.04238779773004
+single_window_predict_ms_median,40.31524999300018
+single_window_predict_ms_p95,110.61034995946095
+throughput_windows_per_sec,56787.27996828508
+streaming_budget_ms_per_window,200.0
