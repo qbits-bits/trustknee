@@ -1,0 +1,10 @@
+metric,value
+streaming_end_to_end_ms_per_window_mean,4.780035727250596
+streaming_end_to_end_ms_per_window_median,4.779346574752727
+streaming_end_to_end_ms_per_window_p95,5.833113458074785
+streaming_call_ms_mean,35613.53513334567
+model_only_batch_ms_per_window_mean,0.01383340999121235
+throughput_windows_per_sec,72288.75603594835
+streaming_budget_ms_per_window,200.0
+end_to_end_ms_per_window,4.780035727250596
+verdict,MEETS
