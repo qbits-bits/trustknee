@@ -130,7 +130,9 @@ def summarize_sensor_attributions(attribution: np.ndarray) -> list[dict[str, flo
         channel_strength = np.abs(sensor_values).sum(axis=0)
         top_channel_index = int(np.argmax(channel_strength))
         peak_time_index = int(np.argmax(temporal_strength))
+        time_resolution_ms = config.WINDOW_MS / MODEL_SEQUENCE_LENGTH
         signed = float(sensor_values.sum())
+        top_modality = "sEMG" if top_channel_index == 6 else "IMU"
         summaries.append(
             {
                 "sensor_id": sensor,
@@ -138,12 +140,18 @@ def summarize_sensor_attributions(attribution: np.ndarray) -> list[dict[str, flo
                 "absolute_attribution": float(np.abs(sensor_values).sum()),
                 "signed_attribution": signed,
                 "direction": "supports" if signed >= 0 else "opposes",
-                "top_modality": "sEMG" if top_channel_index == 6 else "IMU",
+                "top_modality": top_modality,
                 "top_channel": channel_names[top_channel_index],
-                "peak_time_index": peak_time_index,
-                "peak_time_ms": float(
-                    (peak_time_index + 0.5) * config.WINDOW_MS / MODEL_SEQUENCE_LENGTH
+                "signal_interpretation": (
+                    "rectified sEMG activity envelope"
+                    if top_modality == "sEMG"
+                    else "segment kinematics from the IMU"
                 ),
+                "peak_time_bin": peak_time_index,
+                "time_resolution_ms": float(time_resolution_ms),
+                "peak_bin_start_ms": float(peak_time_index * time_resolution_ms),
+                "peak_bin_end_ms": float((peak_time_index + 1) * time_resolution_ms),
+                "peak_bin_center_ms": float((peak_time_index + 0.5) * time_resolution_ms),
             }
         )
     total = sum(float(row["absolute_attribution"]) for row in summaries)

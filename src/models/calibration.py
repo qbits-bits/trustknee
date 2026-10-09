@@ -61,8 +61,8 @@ class TemperatureScaler:
         import torch
         from torch.nn import functional as torch_functional
 
-        values = np.asarray(logits, dtype=np.float64)
-        targets = np.asarray(labels, dtype=np.int64)
+        values = np.array(logits, dtype=np.float64, copy=True)
+        targets = np.array(labels, dtype=np.int64, copy=True)
         if values.ndim != 2 or len(values) != len(targets) or not len(values):
             raise ValueError("Logits must be a non-empty 2D array aligned with labels")
         if not np.all(np.isfinite(values)):
@@ -165,6 +165,83 @@ def compute_calibration_metrics(
         "brier_score": float(brier),
         "nll": negative_log_likelihood(values, targets),
     }
+
+
+def fit_post_pool_temperature(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    max_iter: int = 50,
+) -> TemperatureScaler:
+    """Fit a validation-only temperature after window probabilities are pooled.
+
+    Averaging calibrated window probabilities does not guarantee calibrated
+    trial probabilities. Treating clipped log probabilities as trial logits
+    provides a separate scalar calibrator without looking at test trials.
+    """
+    values, targets = _validate_probabilities(probabilities, labels)
+    logits = np.log(np.clip(values, 1e-12, 1.0))
+    return TemperatureScaler.fit(logits, targets, max_iter=max_iter)
+
+
+def apply_post_pool_temperature(
+    scaler: TemperatureScaler,
+    probabilities: np.ndarray,
+) -> np.ndarray:
+    """Apply a fitted post-pooling temperature to trial probabilities."""
+    values = np.asarray(probabilities, dtype=np.float64)
+    if values.ndim != 2 or not len(values):
+        raise ValueError("Trial probabilities must be a non-empty 2D array")
+    if not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise ValueError("Trial probabilities must be finite and non-negative")
+    if not np.allclose(values.sum(axis=1), 1.0, atol=1e-5):
+        raise ValueError("Trial probability rows must sum to one")
+    logits = np.log(np.clip(values, 1e-12, 1.0))
+    return scaler.predict_proba(logits)
+
+
+def select_binary_decision_threshold(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+) -> dict[str, float]:
+    """Select a binary class threshold by validation Macro-F1 only.
+
+    Class 0 is Correct and class 1 is Wrong. Ties prefer accuracy and then the
+    threshold closest to the neutral 0.5 decision boundary.
+    """
+    from sklearn.metrics import accuracy_score, f1_score, recall_score
+
+    values, targets = _validate_probabilities(probabilities, labels)
+    if values.shape[1] != 2:
+        raise ValueError("Binary decision threshold selection requires two classes")
+
+    wrong_probability = values[:, 1]
+    candidates = np.unique(np.concatenate(([0.0, 0.5, 1.0], wrong_probability)))
+    rows = []
+    for threshold in candidates:
+        predictions = (wrong_probability >= threshold).astype(int)
+        rows.append(
+            {
+                "threshold": float(threshold),
+                "macro_f1": float(
+                    f1_score(targets, predictions, labels=[0, 1], average="macro", zero_division=0)
+                ),
+                "accuracy": float(accuracy_score(targets, predictions)),
+                "correct_recall": float(
+                    recall_score(targets, predictions, labels=[0], average="macro", zero_division=0)
+                ),
+                "wrong_recall": float(
+                    recall_score(targets, predictions, labels=[1], average="macro", zero_division=0)
+                ),
+            }
+        )
+    return max(
+        rows,
+        key=lambda row: (
+            row["macro_f1"],
+            row["accuracy"],
+            -abs(row["threshold"] - 0.5),
+        ),
+    )
 
 
 def risk_coverage_curve(
