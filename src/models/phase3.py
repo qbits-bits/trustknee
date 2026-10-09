@@ -72,6 +72,16 @@ CANONICAL_PROTOCOL = EvaluationProtocol("canonical-50pct-overlap", 0.5, 0, ("bin
 MATCHED_PROTOCOL = EvaluationProtocol("matched-nonoverlap", 0.0, 2, ("binary",))
 CALIBRATION_BIN_COUNT = 15
 SUBJECT_BOOTSTRAP_SAMPLES = 10_000
+TRANSFORMER_INPUT_REPRESENTATION = "synchronized_30x56_sequence"
+XGBOOST_INPUT_REPRESENTATION = "handcrafted_features_from_aligned_windows"
+
+
+def _input_representation(model: str) -> str:
+    return (
+        XGBOOST_INPUT_REPRESENTATION
+        if model == "xgboost_aligned"
+        else TRANSFORMER_INPUT_REPRESENTATION
+    )
 
 
 def _trim_trial_edges(dataset: ModelDataset, count: int) -> ModelDataset:
@@ -232,6 +242,7 @@ def _trial_prediction_rows(
             "predicted_class": int(prediction),
             "num_classes": int(values.shape[1]),
             "decision_threshold": decision_threshold,
+            "input_representation": _input_representation(model),
         }
         row.update(
             {
@@ -252,6 +263,8 @@ def _aggregate_explanations(rows: list[dict[str, object]]) -> list[dict[str, obj
                 {
                     "protocol": explanation["protocol"],
                     "task": explanation["task"],
+                    "input_representation": explanation["input_representation"],
+                    "selection": explanation["selection"],
                     "exercise": explanation["exercise"],
                     "true_class": explanation["true_class"],
                     "predicted_class": explanation["predicted_class"],
@@ -271,6 +284,8 @@ def _aggregate_explanations(rows: list[dict[str, object]]) -> list[dict[str, obj
     groups = [
         "protocol",
         "task",
+        "input_representation",
+        "selection",
         "exercise",
         "true_class",
         "predicted_class",
@@ -290,11 +305,39 @@ def _aggregate_explanations(rows: list[dict[str, object]]) -> list[dict[str, obj
                 "direction": "supports" if mean_signed >= 0 else "opposes",
                 "most_frequent_modality": str(group["top_modality"].mode().iloc[0]),
                 "most_frequent_channel": str(group["top_channel"].mode().iloc[0]),
-                "selection": "correct_high_confidence_representatives",
             }
         )
         summaries.append(row)
     return summaries
+
+
+def _representative_indices(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    metadata: pd.DataFrame,
+    per_class: int,
+) -> list[tuple[int, str]]:
+    """Choose correct representatives, with an explicitly labelled fallback."""
+    predictions = probabilities.argmax(axis=1)
+    confidence = probabilities.max(axis=1)
+    label_ids = metadata.reset_index(drop=True)["label_id"].to_numpy(dtype=int)
+    chosen: list[tuple[int, str]] = []
+    for label_id in sorted(np.unique(label_ids)):
+        true_class = int(labels[np.flatnonzero(label_ids == label_id)[0]])
+        candidates = np.flatnonzero(
+            (label_ids == label_id) & (predictions == true_class) & (labels == true_class)
+        )
+        ranked = candidates[np.argsort(confidence[candidates])[::-1]]
+        chosen.extend(
+            (int(index), "correct_high_confidence_representative_by_label")
+            for index in ranked[:per_class]
+        )
+    if not chosen:
+        chosen.extend(
+            (int(index), "fallback_high_confidence_any_prediction")
+            for index in np.argsort(confidence)[::-1][:per_class]
+        )
+    return chosen
 
 
 def _write_frame(rows: list[dict[str, object]], path: Path) -> None:
@@ -342,17 +385,8 @@ def _explain_representatives(
     predictions = probabilities.argmax(axis=1)
     confidence = probabilities.max(axis=1)
     local_metadata = metadata.reset_index(drop=True)
-    chosen: list[int] = []
-    label_ids = local_metadata["label_id"].to_numpy(dtype=int)
-    for label_id in sorted(np.unique(label_ids)):
-        true_class = int(labels[np.flatnonzero(label_ids == label_id)[0]])
-        candidates = np.flatnonzero(
-            (label_ids == label_id) & (predictions == true_class) & (labels == true_class)
-        )
-        ranked = candidates[np.argsort(confidence[candidates])[::-1]]
-        chosen.extend(ranked[:per_class].tolist())
-    if not chosen:
-        chosen = np.argsort(confidence)[::-1][:per_class].tolist()
+    selections = _representative_indices(probabilities, labels, local_metadata, per_class)
+    chosen = [index for index, _ in selections]
 
     feature_mask = sensor_feature_mask(active_sensors) if active_sensors is not None else None
     attrs = integrated_gradients(
@@ -363,12 +397,13 @@ def _explain_representatives(
         feature_mask=feature_mask,
     )
     rows = []
-    for local_index, attribution in zip(chosen, attrs, strict=True):
+    for (local_index, selection), attribution in zip(selections, attrs, strict=True):
         meta = local_metadata.iloc[local_index]
         label_id = int(meta["label_id"])
         rows.append(
             {
                 "task": task,
+                "input_representation": TRANSFORMER_INPUT_REPRESENTATION,
                 "subject_id": int(meta["subject_id"]),
                 "label_id": label_id,
                 "exercise": config.LABELS[label_id].exercise,
@@ -378,7 +413,7 @@ def _explain_representatives(
                 "predicted_class": int(predictions[local_index]),
                 "true_class": int(labels[local_index]),
                 "confidence": float(confidence[local_index]),
-                "selection": "correct_high_confidence_representative_by_label",
+                "selection": selection,
                 "time_axis": {
                     "window_ms": float(config.WINDOW_MS),
                     "positions": int(normalized_test.shape[1]),
@@ -852,12 +887,6 @@ def run_phase3_transformer(
             )
         )
 
-    representation_by_model = {
-        "transformer": "synchronized_30x56_sequence",
-        "transformer_selective": "synchronized_30x56_sequence",
-        "transformer_thresholded": "synchronized_30x56_sequence",
-        "xgboost_aligned": "handcrafted_features_from_aligned_windows",
-    }
     for rows in (
         metrics_rows,
         class_rows,
@@ -868,14 +897,17 @@ def run_phase3_transformer(
         explanation_rows,
         trial_calibrator_rows,
         decision_threshold_rows,
+        trial_prediction_rows,
     ):
         for row in rows:
             row.setdefault("protocol", protocol.name)
             if "model" in row:
                 row.setdefault(
                     "input_representation",
-                    representation_by_model.get(str(row["model"]), "not_applicable"),
+                    _input_representation(str(row["model"])),
                 )
+            else:
+                row.setdefault("input_representation", TRANSFORMER_INPUT_REPRESENTATION)
 
     trial_predictions = pd.DataFrame(trial_prediction_rows)
     subject_metrics = per_subject_trial_metrics(trial_predictions)

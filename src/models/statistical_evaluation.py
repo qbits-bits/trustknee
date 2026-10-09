@@ -67,6 +67,7 @@ def per_subject_trial_metrics(trial_predictions: pd.DataFrame) -> pd.DataFrame:
         "true_class",
         "predicted_class",
         "num_classes",
+        "input_representation",
     }
     missing = sorted(required.difference(trial_predictions.columns))
     if missing:
@@ -75,9 +76,16 @@ def per_subject_trial_metrics(trial_predictions: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Trial predictions must not be empty")
 
     rows: list[dict[str, object]] = []
-    group_columns = ["protocol", "task", "model", "calibration", "subject_id"]
+    group_columns = [
+        "protocol",
+        "task",
+        "model",
+        "calibration",
+        "input_representation",
+        "subject_id",
+    ]
     for keys, group in trial_predictions.groupby(group_columns, sort=True):
-        protocol, task, model, calibration, subject_id = keys
+        protocol, task, model, calibration, input_representation, subject_id = keys
         num_classes_values = group["num_classes"].unique()
         if len(num_classes_values) != 1:
             raise ValueError("num_classes must be constant within a subject/model/task group")
@@ -91,6 +99,7 @@ def per_subject_trial_metrics(trial_predictions: pd.DataFrame) -> pd.DataFrame:
                 "level": "trial",
                 "model": model,
                 "calibration": calibration,
+                "input_representation": input_representation,
                 "subject_id": int(subject_id),
                 "accuracy": float(accuracy_score(targets, predictions)),
                 "macro_f1": float(
@@ -141,6 +150,7 @@ def paired_subject_comparisons(
         "subject_id",
         "accuracy",
         "macro_f1",
+        "input_representation",
     }
     missing = sorted(required.difference(subject_metrics.columns))
     if missing:
@@ -161,6 +171,10 @@ def paired_subject_comparisons(
             reference_values = reference.loc[subjects, metric].to_numpy(dtype=float)
             baseline_values = baseline.loc[subjects, metric].to_numpy(dtype=float)
             differences = reference_values - baseline_values
+            reference_representations = reference.loc[subjects, "input_representation"].unique()
+            baseline_representations = baseline.loc[subjects, "input_representation"].unique()
+            if len(reference_representations) != 1 or len(baseline_representations) != 1:
+                raise ValueError("Each paired model must use one declared input representation")
             sampled_subjects = rng.integers(
                 0, len(subjects), size=(bootstrap_samples, len(subjects))
             )
@@ -173,6 +187,8 @@ def paired_subject_comparisons(
                     "metric": metric,
                     "reference_model": reference_model,
                     "baseline_model": baseline_model,
+                    "reference_input_representation": str(reference_representations[0]),
+                    "baseline_input_representation": str(baseline_representations[0]),
                     "n_subjects": int(len(subjects)),
                     "reference_subject_mean": float(reference_values.mean()),
                     "reference_subject_sd": float(reference_values.std(ddof=1))
