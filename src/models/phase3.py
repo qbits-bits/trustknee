@@ -26,9 +26,12 @@ from src.ingestion import build_manifest
 from src.models.artifacts import save_transformer_artifact
 from src.models.calibration import (
     TemperatureScaler,
+    apply_post_pool_temperature,
     compute_calibration_metrics,
+    fit_post_pool_temperature,
     reliability_bins,
     risk_coverage_curve,
+    select_binary_decision_threshold,
     select_uncertainty_threshold,
 )
 from src.models.evaluation import average_trial_probabilities, fixed_subject_split
@@ -40,6 +43,11 @@ from src.models.explainability import (
 )
 from src.models.model_data import ModelDataset, build_model_inputs
 from src.models.normalization import fit_sequence_normalizer
+from src.models.statistical_evaluation import (
+    paired_subject_comparisons,
+    per_subject_trial_metrics,
+    validate_paired_trial_alignment,
+)
 from src.models.training import (
     QUICK_TRAINING,
     TrainingConfig,
@@ -62,6 +70,18 @@ class EvaluationProtocol:
 
 CANONICAL_PROTOCOL = EvaluationProtocol("canonical-50pct-overlap", 0.5, 0, ("binary", "nine_class"))
 MATCHED_PROTOCOL = EvaluationProtocol("matched-nonoverlap", 0.0, 2, ("binary",))
+CALIBRATION_BIN_COUNT = 15
+SUBJECT_BOOTSTRAP_SAMPLES = 10_000
+TRANSFORMER_INPUT_REPRESENTATION = "synchronized_30x56_sequence"
+XGBOOST_INPUT_REPRESENTATION = "handcrafted_features_from_aligned_windows"
+
+
+def _input_representation(model: str) -> str:
+    return (
+        XGBOOST_INPUT_REPRESENTATION
+        if model == "xgboost_aligned"
+        else TRANSFORMER_INPUT_REPRESENTATION
+    )
 
 
 def _trim_trial_edges(dataset: ModelDataset, count: int) -> ModelDataset:
@@ -126,10 +146,16 @@ def _classification_result(
     level: str,
     model: str,
     calibration: str,
+    decision_threshold: float | None = None,
 ) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]]]:
     values = np.asarray(probabilities, dtype=float)
     targets = np.asarray(labels, dtype=int)
-    predictions = values.argmax(axis=1)
+    if decision_threshold is None:
+        predictions = values.argmax(axis=1)
+    else:
+        if values.shape[1] != 2 or not 0 <= decision_threshold <= 1:
+            raise ValueError("A binary decision threshold must be in [0, 1]")
+        predictions = (values[:, 1] >= decision_threshold).astype(int)
     classes = list(range(values.shape[1]))
     precision, recall, class_f1, support = precision_recall_fscore_support(
         targets, predictions, labels=classes, zero_division=0
@@ -145,6 +171,7 @@ def _classification_result(
         ),
         "balanced_accuracy": float(balanced_accuracy_score(targets, predictions)),
         "n_samples": len(targets),
+        "decision_threshold": decision_threshold,
     }
     class_rows = [
         {
@@ -157,6 +184,7 @@ def _classification_result(
             "recall": float(recall[class_index]),
             "f1": float(class_f1[class_index]),
             "support": int(support[class_index]),
+            "decision_threshold": decision_threshold,
         }
         for class_index in classes
     ]
@@ -170,11 +198,146 @@ def _classification_result(
             "true_class": true_class,
             "predicted_class": predicted_class,
             "count": int(matrix[true_class, predicted_class]),
+            "decision_threshold": decision_threshold,
         }
         for true_class in classes
         for predicted_class in classes
     ]
     return result, class_rows, confusion_rows
+
+
+def _trial_prediction_rows(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    trials: pd.DataFrame,
+    *,
+    protocol: str,
+    task: str,
+    model: str,
+    calibration: str,
+    decision_threshold: float | None = None,
+) -> list[dict[str, object]]:
+    values = np.asarray(probabilities, dtype=float)
+    targets = np.asarray(labels, dtype=int)
+    if values.ndim != 2 or len(values) != len(targets) or len(values) != len(trials):
+        raise ValueError("Trial probabilities, labels, and metadata must align")
+    if decision_threshold is None:
+        predictions = values.argmax(axis=1)
+    else:
+        if values.shape[1] != 2 or not 0 <= decision_threshold <= 1:
+            raise ValueError("A binary decision threshold must be in [0, 1]")
+        predictions = (values[:, 1] >= decision_threshold).astype(int)
+
+    rows = []
+    local_trials = trials.reset_index(drop=True)
+    for index, (target, prediction) in enumerate(zip(targets, predictions, strict=True)):
+        row = {
+            "protocol": protocol,
+            "task": task,
+            "model": model,
+            "calibration": calibration,
+            "subject_id": int(local_trials.iloc[index]["subject_id"]),
+            "trial_id": str(local_trials.iloc[index]["trial_id"]),
+            "true_class": int(target),
+            "predicted_class": int(prediction),
+            "num_classes": int(values.shape[1]),
+            "decision_threshold": decision_threshold,
+            "input_representation": _input_representation(model),
+        }
+        row.update(
+            {
+                f"probability_{class_index}": float(value)
+                for class_index, value in enumerate(values[index])
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def _aggregate_explanations(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Aggregate representative-window attributions by exercise and class."""
+    flattened = []
+    for explanation in rows:
+        for sensor in explanation["sensors"]:
+            flattened.append(
+                {
+                    "protocol": explanation["protocol"],
+                    "task": explanation["task"],
+                    "input_representation": explanation["input_representation"],
+                    "selection": explanation["selection"],
+                    "exercise": explanation["exercise"],
+                    "true_class": explanation["true_class"],
+                    "predicted_class": explanation["predicted_class"],
+                    "sensor_id": sensor["sensor_id"],
+                    "sensor_name": sensor["sensor_name"],
+                    "absolute_attribution": sensor["absolute_attribution"],
+                    "signed_attribution": sensor["signed_attribution"],
+                    "attribution_fraction": sensor["attribution_fraction"],
+                    "top_modality": sensor["top_modality"],
+                    "top_channel": sensor["top_channel"],
+                }
+            )
+    if not flattened:
+        return []
+
+    frame = pd.DataFrame(flattened)
+    groups = [
+        "protocol",
+        "task",
+        "input_representation",
+        "selection",
+        "exercise",
+        "true_class",
+        "predicted_class",
+        "sensor_id",
+        "sensor_name",
+    ]
+    summaries = []
+    for keys, group in frame.groupby(groups, sort=True):
+        row = dict(zip(groups, keys, strict=True))
+        mean_signed = float(group["signed_attribution"].mean())
+        row.update(
+            {
+                "n_representative_windows": int(len(group)),
+                "mean_absolute_attribution": float(group["absolute_attribution"].mean()),
+                "mean_signed_attribution": mean_signed,
+                "mean_attribution_fraction": float(group["attribution_fraction"].mean()),
+                "direction": "supports" if mean_signed >= 0 else "opposes",
+                "most_frequent_modality": str(group["top_modality"].mode().iloc[0]),
+                "most_frequent_channel": str(group["top_channel"].mode().iloc[0]),
+            }
+        )
+        summaries.append(row)
+    return summaries
+
+
+def _representative_indices(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    metadata: pd.DataFrame,
+    per_class: int,
+) -> list[tuple[int, str]]:
+    """Choose correct representatives, with an explicitly labelled fallback."""
+    predictions = probabilities.argmax(axis=1)
+    confidence = probabilities.max(axis=1)
+    label_ids = metadata.reset_index(drop=True)["label_id"].to_numpy(dtype=int)
+    chosen: list[tuple[int, str]] = []
+    for label_id in sorted(np.unique(label_ids)):
+        true_class = int(labels[np.flatnonzero(label_ids == label_id)[0]])
+        candidates = np.flatnonzero(
+            (label_ids == label_id) & (predictions == true_class) & (labels == true_class)
+        )
+        ranked = candidates[np.argsort(confidence[candidates])[::-1]]
+        chosen.extend(
+            (int(index), "correct_high_confidence_representative_by_label")
+            for index in ranked[:per_class]
+        )
+    if not chosen:
+        chosen.extend(
+            (int(index), "fallback_high_confidence_any_prediction")
+            for index in np.argsort(confidence)[::-1][:per_class]
+        )
+    return chosen
 
 
 def _write_frame(rows: list[dict[str, object]], path: Path) -> None:
@@ -221,13 +384,9 @@ def _explain_representatives(
 ) -> list[dict[str, object]]:
     predictions = probabilities.argmax(axis=1)
     confidence = probabilities.max(axis=1)
-    chosen: list[int] = []
-    for class_index in range(probabilities.shape[1]):
-        candidates = np.flatnonzero((predictions == class_index) & (labels == class_index))
-        ranked = candidates[np.argsort(confidence[candidates])[::-1]]
-        chosen.extend(ranked[:per_class].tolist())
-    if not chosen:
-        chosen = np.argsort(confidence)[::-1][:per_class].tolist()
+    local_metadata = metadata.reset_index(drop=True)
+    selections = _representative_indices(probabilities, labels, local_metadata, per_class)
+    chosen = [index for index, _ in selections]
 
     feature_mask = sensor_feature_mask(active_sensors) if active_sensors is not None else None
     attrs = integrated_gradients(
@@ -238,19 +397,29 @@ def _explain_representatives(
         feature_mask=feature_mask,
     )
     rows = []
-    local_metadata = metadata.reset_index(drop=True)
-    for local_index, attribution in zip(chosen, attrs, strict=True):
+    for (local_index, selection), attribution in zip(selections, attrs, strict=True):
         meta = local_metadata.iloc[local_index]
+        label_id = int(meta["label_id"])
         rows.append(
             {
                 "task": task,
+                "input_representation": TRANSFORMER_INPUT_REPRESENTATION,
                 "subject_id": int(meta["subject_id"]),
-                "label_id": int(meta["label_id"]),
+                "label_id": label_id,
+                "exercise": config.LABELS[label_id].exercise,
+                "label_description": config.LABELS[label_id].description,
                 "trial_num": int(meta["trial_num"]),
                 "window_index": int(meta["window_index"]),
                 "predicted_class": int(predictions[local_index]),
                 "true_class": int(labels[local_index]),
                 "confidence": float(confidence[local_index]),
+                "selection": selection,
+                "time_axis": {
+                    "window_ms": float(config.WINDOW_MS),
+                    "positions": int(normalized_test.shape[1]),
+                    "bin_width_ms": float(config.WINDOW_MS / normalized_test.shape[1]),
+                    "interpretation": "model input bins, not isolated physiological events",
+                },
                 "sensors": summarize_sensor_attributions(attribution),
             }
         )
@@ -333,6 +502,8 @@ def run_phase3_transformer(
         "training": asdict(training_config),
         "explanation_steps": explanation_steps,
         "explanations_per_class": explanations_per_class,
+        "calibration_bins": CALIBRATION_BIN_COUNT,
+        "subject_bootstrap_samples": SUBJECT_BOOTSTRAP_SAMPLES,
         "dataset_fingerprint_sha256": _dataset_fingerprint(dataset, protocol),
         "n_windows": dataset.n_samples,
         "n_trials": int(dataset.metadata["trial_id"].nunique()),
@@ -349,6 +520,9 @@ def run_phase3_transformer(
     reliability_rows: list[dict[str, object]] = []
     risk_rows: list[dict[str, object]] = []
     explanation_rows: list[dict[str, object]] = []
+    trial_prediction_rows: list[dict[str, object]] = []
+    trial_calibrator_rows: list[dict[str, object]] = []
+    decision_threshold_rows: list[dict[str, object]] = []
 
     normalizer = fit_sequence_normalizer(dataset.transformer_sequences, train_indices)
     normalized = normalizer.transform(dataset.transformer_sequences)
@@ -385,6 +559,39 @@ def run_phase3_transformer(
         calibrated_validation = scaler.predict_proba(validation_logits)
         raw_test = TemperatureScaler().predict_proba(test_logits)
         calibrated_test = scaler.predict_proba(test_logits)
+        validation_trial_labels, validation_trial_probabilities, validation_trials = _trial_values(
+            calibrated_validation,
+            dataset.metadata.iloc[validation_indices],
+            labels[validation_indices],
+        )
+        test_trial_labels, test_trial_probabilities, test_trials = _trial_values(
+            calibrated_test,
+            dataset.metadata.iloc[test_indices],
+            labels[test_indices],
+        )
+        trial_scaler = fit_post_pool_temperature(
+            validation_trial_probabilities,
+            validation_trial_labels,
+        )
+        calibrated_validation_trials = apply_post_pool_temperature(
+            trial_scaler,
+            validation_trial_probabilities,
+        )
+        calibrated_test_trials = apply_post_pool_temperature(
+            trial_scaler,
+            test_trial_probabilities,
+        )
+        trial_calibrator_rows.append(
+            {
+                "task": task,
+                "fit_split": "validation_trials",
+                "pooling": "arithmetic_mean_window_probabilities",
+                "method": "temperature_on_log_pooled_probabilities",
+                "temperature": float(trial_scaler.temperature),
+                "n_validation_trials": int(len(validation_trial_labels)),
+                "n_test_trials": int(len(test_trial_labels)),
+            }
+        )
         threshold_selection = select_uncertainty_threshold(
             calibrated_validation, labels[validation_indices]
         )
@@ -415,24 +622,146 @@ def run_phase3_transformer(
                 metrics_rows.append(result)
                 class_rows.extend(per_class)
                 confusion_rows.extend(confusion)
-                calibration_metric = compute_calibration_metrics(level_probabilities, level_labels)
+                bins = reliability_bins(
+                    level_probabilities,
+                    level_labels,
+                    n_bins=CALIBRATION_BIN_COUNT,
+                )
+                calibration_metric = compute_calibration_metrics(
+                    level_probabilities,
+                    level_labels,
+                    n_bins=CALIBRATION_BIN_COUNT,
+                )
                 calibration_rows.append(
                     {
                         "task": task,
                         "level": level,
                         "calibration": calibration_name,
+                        "n_samples": int(len(level_labels)),
+                        "n_bins": CALIBRATION_BIN_COUNT,
+                        "nonempty_bins": int(sum(int(row["count"]) > 0 for row in bins)),
                         **calibration_metric,
                     }
                 )
-                for row in reliability_bins(level_probabilities, level_labels):
+                for row in bins:
                     reliability_rows.append(
                         {
                             "task": task,
                             "level": level,
                             "calibration": calibration_name,
+                            "split": "test",
+                            "n_samples": int(len(level_labels)),
+                            "n_bins": CALIBRATION_BIN_COUNT,
                             **row,
                         }
                     )
+
+        trial_result, trial_classes, trial_confusion = _classification_result(
+            calibrated_test_trials,
+            test_trial_labels,
+            task=task,
+            level="trial",
+            model="transformer",
+            calibration="trial_temperature",
+        )
+        metrics_rows.append(trial_result)
+        class_rows.extend(trial_classes)
+        confusion_rows.extend(trial_confusion)
+        trial_bins = reliability_bins(
+            calibrated_test_trials,
+            test_trial_labels,
+            n_bins=CALIBRATION_BIN_COUNT,
+        )
+        calibration_rows.append(
+            {
+                "task": task,
+                "level": "trial",
+                "calibration": "trial_temperature",
+                "n_samples": int(len(test_trial_labels)),
+                "n_bins": CALIBRATION_BIN_COUNT,
+                "nonempty_bins": int(sum(int(row["count"]) > 0 for row in trial_bins)),
+                **compute_calibration_metrics(
+                    calibrated_test_trials,
+                    test_trial_labels,
+                    n_bins=CALIBRATION_BIN_COUNT,
+                ),
+            }
+        )
+        for row in trial_bins:
+            reliability_rows.append(
+                {
+                    "task": task,
+                    "level": "trial",
+                    "calibration": "trial_temperature",
+                    "split": "test",
+                    "n_samples": int(len(test_trial_labels)),
+                    "n_bins": CALIBRATION_BIN_COUNT,
+                    **row,
+                }
+            )
+
+        trial_prediction_rows.extend(
+            _trial_prediction_rows(
+                test_trial_probabilities,
+                test_trial_labels,
+                test_trials,
+                protocol=protocol.name,
+                task=task,
+                model="transformer",
+                calibration="temperature",
+            )
+        )
+        trial_prediction_rows.extend(
+            _trial_prediction_rows(
+                calibrated_test_trials,
+                test_trial_labels,
+                test_trials,
+                protocol=protocol.name,
+                task=task,
+                model="transformer",
+                calibration="trial_temperature",
+            )
+        )
+
+        if task == "binary":
+            decision_selection = select_binary_decision_threshold(
+                calibrated_validation_trials,
+                validation_trial_labels,
+            )
+            decision_threshold = float(decision_selection["threshold"])
+            decision_threshold_rows.append(
+                {
+                    "task": task,
+                    "fit_split": "validation_trials",
+                    "calibration": "trial_temperature",
+                    "n_validation_trials": int(len(validation_trials)),
+                    **decision_selection,
+                }
+            )
+            thresholded_result, thresholded_classes, thresholded_confusion = _classification_result(
+                calibrated_test_trials,
+                test_trial_labels,
+                task=task,
+                level="trial",
+                model="transformer_thresholded",
+                calibration="trial_temperature",
+                decision_threshold=decision_threshold,
+            )
+            metrics_rows.append(thresholded_result)
+            class_rows.extend(thresholded_classes)
+            confusion_rows.extend(thresholded_confusion)
+            trial_prediction_rows.extend(
+                _trial_prediction_rows(
+                    calibrated_test_trials,
+                    test_trial_labels,
+                    test_trials,
+                    protocol=protocol.name,
+                    task=task,
+                    model="transformer_thresholded",
+                    calibration="trial_temperature",
+                    decision_threshold=decision_threshold,
+                )
+            )
 
         for split, probabilities, split_labels in (
             ("validation", calibrated_validation, labels[validation_indices]),
@@ -522,16 +851,18 @@ def run_phase3_transformer(
         xgb_probabilities = predict_xgboost(
             xgb, dataset.xgboost_features.iloc[test_indices], num_classes
         )
+        xgb_trial_labels, xgb_trial_probabilities, xgb_trials = _trial_values(
+            xgb_probabilities,
+            dataset.metadata.iloc[test_indices],
+            labels[test_indices],
+        )
         for level in ("window", "trial"):
             if level == "window":
                 level_labels = labels[test_indices]
                 level_probabilities = xgb_probabilities
             else:
-                level_labels, level_probabilities, _ = _trial_values(
-                    xgb_probabilities,
-                    dataset.metadata.iloc[test_indices],
-                    labels[test_indices],
-                )
+                level_labels = xgb_trial_labels
+                level_probabilities = xgb_trial_probabilities
             result, per_class, confusion = _classification_result(
                 level_probabilities,
                 level_labels,
@@ -544,13 +875,96 @@ def run_phase3_transformer(
             class_rows.extend(per_class)
             confusion_rows.extend(confusion)
 
+        trial_prediction_rows.extend(
+            _trial_prediction_rows(
+                xgb_trial_probabilities,
+                xgb_trial_labels,
+                xgb_trials,
+                protocol=protocol.name,
+                task=task,
+                model="xgboost_aligned",
+                calibration="none",
+            )
+        )
+
+    for rows in (
+        metrics_rows,
+        class_rows,
+        confusion_rows,
+        calibration_rows,
+        reliability_rows,
+        risk_rows,
+        explanation_rows,
+        trial_calibrator_rows,
+        decision_threshold_rows,
+        trial_prediction_rows,
+    ):
+        for row in rows:
+            row.setdefault("protocol", protocol.name)
+            if "model" in row:
+                row.setdefault(
+                    "input_representation",
+                    _input_representation(str(row["model"])),
+                )
+            else:
+                row.setdefault("input_representation", TRANSFORMER_INPUT_REPRESENTATION)
+
+    trial_predictions = pd.DataFrame(trial_prediction_rows)
+    subject_metrics = per_subject_trial_metrics(trial_predictions)
+    primary_trial_predictions = trial_predictions[
+        (
+            (trial_predictions["model"] == "transformer")
+            & (trial_predictions["calibration"] == "temperature")
+        )
+        | (trial_predictions["model"] == "xgboost_aligned")
+    ].reset_index(drop=True)
+    paired_input = subject_metrics[
+        (
+            (subject_metrics["model"] == "transformer")
+            & (subject_metrics["calibration"] == "temperature")
+        )
+        | (subject_metrics["model"] == "xgboost_aligned")
+    ].reset_index(drop=True)
+    if {"transformer", "xgboost_aligned"}.issubset(primary_trial_predictions["model"].unique()):
+        validate_paired_trial_alignment(primary_trial_predictions)
+        paired_comparisons = paired_subject_comparisons(
+            paired_input,
+            seed=seed,
+            bootstrap_samples=SUBJECT_BOOTSTRAP_SAMPLES,
+        )
+    else:
+        paired_comparisons = pd.DataFrame()
+    explanation_summaries = _aggregate_explanations(explanation_rows)
+
     _write_frame(metrics_rows, destination / "metrics.csv")
     _write_frame(class_rows, destination / "per_class_metrics.csv")
     _write_frame(confusion_rows, destination / "confusion_matrices.csv")
     _write_frame(calibration_rows, destination / "calibration_metrics.csv")
     _write_frame(reliability_rows, destination / "reliability_bins.csv")
     _write_frame(risk_rows, destination / "risk_coverage.csv")
+    _write_frame(trial_prediction_rows, destination / "trial_predictions.csv")
+    _write_frame(subject_metrics.to_dict("records"), destination / "per_subject_metrics.csv")
+    _write_frame(
+        paired_comparisons.to_dict("records"),
+        destination / "paired_model_comparisons.csv",
+    )
+    _write_frame(trial_calibrator_rows, destination / "trial_calibration.csv")
+    _write_frame(decision_threshold_rows, destination / "binary_decision_thresholds.csv")
+    _write_frame(explanation_summaries, destination / "integrated_gradients_summary.csv")
     _write_json(explanation_rows, destination / "integrated_gradients.json")
+    _write_json(
+        {
+            "protocol": protocol.name,
+            "aligned_on": ["subject_split", "trial", "window", "target"],
+            "transformer_input": "synchronized 30x56 IMU and sEMG-activity sequence",
+            "xgboost_aligned_input": "handcrafted summaries from the aligned windows",
+            "claim_boundary": (
+                "Model differences apply only to this named protocol and representation; "
+                "canonical, matched, and exact-engineered XGBoost results are not interchangeable."
+            ),
+        },
+        destination / "comparison_scope.json",
+    )
     return pd.DataFrame(metrics_rows)
 
 

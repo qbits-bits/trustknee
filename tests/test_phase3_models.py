@@ -14,10 +14,13 @@ from src.inference.mock_engine import MockInferenceEngine
 from src.models.artifacts import load_transformer_artifact, save_transformer_artifact
 from src.models.calibration import (
     TemperatureScaler,
+    apply_post_pool_temperature,
     compute_calibration_metrics,
+    fit_post_pool_temperature,
     negative_log_likelihood,
     reliability_bins,
     risk_coverage_curve,
+    select_binary_decision_threshold,
     select_uncertainty_threshold,
 )
 from src.models.explainability import (
@@ -26,7 +29,16 @@ from src.models.explainability import (
     summarize_sensor_attributions,
 )
 from src.models.normalization import SequenceNormalizer
-from src.models.phase3 import CANONICAL_PROTOCOL, run_phase3_transformer
+from src.models.phase3 import (
+    CANONICAL_PROTOCOL,
+    _representative_indices,
+    run_phase3_transformer,
+)
+from src.models.statistical_evaluation import (
+    paired_subject_comparisons,
+    per_subject_trial_metrics,
+    validate_paired_trial_alignment,
+)
 from src.models.transformer import TransformerEncoderClassifier
 
 
@@ -52,6 +64,31 @@ def test_calibration_metrics_and_reliability_bins_are_finite():
     assert np.isfinite(list(metrics.values())).all()
     assert len(bins) == 5
     assert sum(row["count"] for row in bins) == 3
+
+
+def test_trial_temperature_is_fitted_and_applied_without_validation_leakage():
+    probabilities = np.array([[0.99, 0.01], [0.95, 0.05], [0.10, 0.90], [0.85, 0.15]], dtype=float)
+    labels = np.array([0, 1, 1, 1])
+
+    scaler = fit_post_pool_temperature(probabilities, labels)
+    calibrated = apply_post_pool_temperature(scaler, probabilities)
+
+    assert calibrated.shape == probabilities.shape
+    assert np.allclose(calibrated.sum(axis=1), 1.0)
+    assert negative_log_likelihood(calibrated, labels) <= negative_log_likelihood(
+        probabilities, labels
+    )
+
+
+def test_binary_decision_threshold_is_selected_on_supplied_validation_trials():
+    probabilities = np.array([[0.70, 0.30], [0.60, 0.40], [0.55, 0.45], [0.40, 0.60], [0.35, 0.65]])
+    labels = np.array([0, 0, 1, 1, 1])
+
+    selected = select_binary_decision_threshold(probabilities, labels)
+
+    assert 0.0 <= selected["threshold"] <= 1.0
+    assert selected["macro_f1"] >= 0.8
+    assert {"correct_recall", "wrong_recall"} <= set(selected)
 
 
 def test_uncertainty_threshold_is_deterministic_and_respects_coverage():
@@ -117,8 +154,117 @@ def test_sensor_attribution_summary_uses_physical_sensor_names():
     assert summary[0]["sensor_name"] == config.SENSOR_PLACEMENT[1]
     assert summary[0]["top_modality"] == "IMU"
     assert summary[0]["top_channel"] == "acc_x"
-    assert summary[0]["peak_time_ms"] > 0
+    assert summary[0]["peak_time_bin"] == 0
+    assert summary[0]["peak_bin_start_ms"] == 0
+    assert summary[0]["peak_bin_end_ms"] == pytest.approx(config.WINDOW_MS / 30)
+    assert summary[0]["peak_bin_center_ms"] == pytest.approx(config.WINDOW_MS / 60)
+    assert summary[0]["signal_interpretation"] == "segment kinematics from the IMU"
     assert sum(float(row["attribution_fraction"]) for row in summary) == pytest.approx(1.0)
+
+
+def test_subject_clustered_comparison_reports_variability_ci_and_paired_test():
+    predictions = pd.DataFrame(
+        [
+            {
+                "protocol": "matched",
+                "task": "binary",
+                "model": model,
+                "calibration": calibration,
+                "subject_id": subject,
+                "trial_id": f"s{subject}-t{trial}",
+                "true_class": true,
+                "predicted_class": predicted,
+                "num_classes": 2,
+                "input_representation": (
+                    "synchronized_30x56_sequence"
+                    if model == "transformer"
+                    else "handcrafted_features_from_aligned_windows"
+                ),
+            }
+            for model, calibration, predicted_by_subject in (
+                ("transformer", "temperature", {1: [0, 1], 2: [0, 1], 3: [0, 1]}),
+                ("xgboost_aligned", "none", {1: [1, 1], 2: [0, 0], 3: [1, 1]}),
+            )
+            for subject, predictions_for_subject in predicted_by_subject.items()
+            for trial, (true, predicted) in enumerate(
+                zip([0, 1], predictions_for_subject, strict=True), start=1
+            )
+        ]
+    )
+
+    subject_metrics = per_subject_trial_metrics(predictions)
+    validate_paired_trial_alignment(predictions)
+    comparison = paired_subject_comparisons(
+        subject_metrics,
+        seed=7,
+        bootstrap_samples=500,
+    )
+
+    assert len(subject_metrics) == 6
+    assert set(comparison["metric"]) == {"accuracy", "macro_f1"}
+    assert (comparison["n_subjects"] == 3).all()
+    assert (comparison["bootstrap_unit"] == "subject").all()
+    assert comparison["paired_sign_flip_p_value"].between(0, 1).all()
+    assert (
+        comparison["subject_bootstrap_ci_lower"] <= comparison["subject_bootstrap_ci_upper"]
+    ).all()
+    accuracy_comparison = comparison[comparison["metric"] == "accuracy"].iloc[0]
+    assert accuracy_comparison.paired_mean_difference == pytest.approx(0.5)
+    assert accuracy_comparison.subject_bootstrap_ci_lower == pytest.approx(0.5)
+    assert accuracy_comparison.subject_bootstrap_ci_upper == pytest.approx(0.5)
+    assert accuracy_comparison.paired_sign_flip_p_value == pytest.approx(0.25)
+    assert accuracy_comparison.reference_input_representation == "synchronized_30x56_sequence"
+    assert (
+        accuracy_comparison.baseline_input_representation
+        == "handcrafted_features_from_aligned_windows"
+    )
+
+    incomplete = predictions.drop(predictions.index[-1])
+    with pytest.raises(ValueError, match="identical trials"):
+        validate_paired_trial_alignment(incomplete)
+
+    mixed_rows = []
+    for model, representation, values in (
+        ("transformer", "sequence", [1.0, 0.5, 0.0]),
+        ("xgboost_aligned", "features", [0.0, 0.5, 0.5]),
+    ):
+        for subject_id, (value, n_trials) in enumerate(
+            zip(values, [1, 100, 1000], strict=True), start=1
+        ):
+            mixed_rows.append(
+                {
+                    "protocol": "matched",
+                    "task": "binary",
+                    "model": model,
+                    "subject_id": subject_id,
+                    "accuracy": value,
+                    "macro_f1": value,
+                    "input_representation": representation,
+                    "n_trials": n_trials,
+                }
+            )
+    mixed = paired_subject_comparisons(
+        pd.DataFrame(mixed_rows),
+        seed=11,
+        bootstrap_samples=10_000,
+    )
+    mixed_accuracy = mixed[mixed["metric"] == "accuracy"].iloc[0]
+    assert mixed_accuracy.paired_mean_difference == pytest.approx(1 / 6)
+    assert mixed_accuracy.subject_bootstrap_ci_lower == pytest.approx(-0.5)
+    assert mixed_accuracy.subject_bootstrap_ci_upper == pytest.approx(1.0)
+
+
+def test_explanation_fallback_is_not_labelled_as_a_correct_prediction():
+    metadata = pd.DataFrame({"label_id": [1, 1]})
+    labels = np.array([1, 1])
+    all_wrong = np.array([[0.9, 0.1], [0.8, 0.2]])
+    one_correct = np.array([[0.1, 0.9], [0.8, 0.2]])
+
+    fallback = _representative_indices(all_wrong, labels, metadata, per_class=1)
+    selected = _representative_indices(one_correct, labels, metadata, per_class=1)
+
+    assert fallback[0][1] == "fallback_high_confidence_any_prediction"
+    assert selected[0][1] == "correct_high_confidence_representative_by_label"
 
 
 def test_trial_explanation_excludes_zero_attribution_masked_sensors():
@@ -235,13 +381,45 @@ def test_quick_phase3_run_writes_calibration_explanations_and_artifacts(tmp_path
         "calibration_metrics.csv",
         "reliability_bins.csv",
         "risk_coverage.csv",
+        "trial_predictions.csv",
+        "per_subject_metrics.csv",
+        "paired_model_comparisons.csv",
+        "trial_calibration.csv",
+        "binary_decision_thresholds.csv",
         "integrated_gradients.json",
+        "integrated_gradients_summary.csv",
+        "comparison_scope.json",
         "transformer_binary.pt",
         "transformer_nine_class.pt",
     ):
         assert (output / filename).exists()
     explanations = json.loads((output / "integrated_gradients.json").read_text())
     assert explanations
+    assert all(item["protocol"] == CANONICAL_PROTOCOL.name for item in explanations)
+    summary = pd.read_csv(output / "integrated_gradients_summary.csv")
+    assert {
+        "exercise",
+        "true_class",
+        "sensor_name",
+        "selection",
+        "input_representation",
+        "n_representative_windows",
+    } <= set(summary)
+    calibration = pd.read_csv(output / "calibration_metrics.csv")
+    assert "trial_temperature" in set(calibration["calibration"])
+    assert (calibration["n_bins"] == 15).all()
+    reliability = pd.read_csv(output / "reliability_bins.csv")
+    assert reliability.groupby(["task", "level", "calibration"])["count"].sum().gt(0).all()
+    per_subject = pd.read_csv(output / "per_subject_metrics.csv")
+    assert set(per_subject["subject_id"]) == set(config.PHASE3_TEST_SUBJECTS)
+    assert per_subject["input_representation"].notna().all()
+    comparisons = pd.read_csv(output / "paired_model_comparisons.csv")
+    assert set(comparisons["metric"]) == {"accuracy", "macro_f1"}
+    assert (comparisons["n_subjects"] == len(config.PHASE3_TEST_SUBJECTS)).all()
+    assert {
+        "reference_input_representation",
+        "baseline_input_representation",
+    } <= set(comparisons)
 
 
 def test_phase3_can_reuse_a_prepared_dataset(tmp_path):
