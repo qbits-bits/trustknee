@@ -104,6 +104,27 @@ MODEL_CONFIGS = {
 
 
 # ---------------------------------------------------------------- load / trim
+CONTEXT_PREFIX = "ctx_"
+FORBIDDEN_FEATURE_SUBSTRINGS = ("subject", "label", "time", "index", "trial", "id", "exercise")
+
+
+def build_feature_manifest(feat_cols):
+    """Audit helper: list context columns and flag identity/time/label leakage columns."""
+    cols = [str(c) for c in feat_cols]
+    return {
+        "n_features": len(cols),
+        "context_columns": [c for c in cols if c.startswith(CONTEXT_PREFIX)],
+        "forbidden_columns": [
+            c for c in cols if any(s in c.lower() for s in FORBIDDEN_FEATURE_SUBSTRINGS)
+        ],
+    }
+
+
+def drop_context_columns(feat_cols):
+    """Return the feature list with all exercise-context columns removed."""
+    return [c for c in feat_cols if not c.startswith(CONTEXT_PREFIX)]
+
+
 def _ensure_trial_id(df):
     """Return a copy with an opaque, label-independent grouping key available."""
     local = df.copy()
@@ -184,7 +205,7 @@ def _sensor_col(df, s, sig_type):
     return cand[0]
 
 
-def build_features(df):
+def build_features(df, no_context=False):
     """Exact Phase-2 feature engineering with review fixes. Returns (df, feat_cols)."""
     df = _ensure_trial_id(df)
     required = {*TRIAL_GROUP_COLUMNS, "window_index", "exercise"}
@@ -223,8 +244,9 @@ def build_features(df):
             df[f"loadshare_{t}_{c[1]}"] = df[c] / tt
         left = [anchors[s][t] for s in range(1, 5) if anchors[s][t]]
         df[f"lrshare_{t}"] = df[left].sum(axis=1) / tt
-    ctx = pd.get_dummies(df["exercise"], prefix="ctx", dtype=int)
-    df = pd.concat([df, ctx], axis=1)
+    if not no_context:
+        ctx = pd.get_dummies(df["exercise"], prefix="ctx", dtype=int)
+        df = pd.concat([df, ctx], axis=1)
     grp = df.groupby(TRIAL_GROUP_COLUMNS, sort=False)
 
     # kinematics (delta2 now grouped: no cross-trial contamination)
@@ -292,6 +314,8 @@ def build_features(df):
             df[f"inter_sym_ctrl_{L}{R}"] = df[sym] * df[cl]
 
     feat_cols = [c for c in df.columns if c not in ID_COLS and any(p in c for p in ENG_PATTERNS)]
+    if no_context:
+        feat_cols = drop_context_columns(feat_cols)
     return df, feat_cols
 
 
@@ -562,6 +586,11 @@ def main():
     ap.add_argument(
         "--legacy", action="store_true", help="use original Phase-2 seeded 70/15/15 split"
     )
+    ap.add_argument(
+        "--no-context",
+        action="store_true",
+        help="exclude exercise-context (ctx_*) features from training and inference",
+    )
     args = ap.parse_args()
     out_dir = args.out or (
         "models/xgboost_phase2split" if args.legacy else "models/xgboost_canonical"
@@ -573,7 +602,12 @@ def main():
         if args.data_root is not None
         else load_and_trim(args.data)
     )
-    df, feat_cols = build_features(df)
+    df, feat_cols = build_features(df, no_context=args.no_context)
+    manifest = build_feature_manifest(feat_cols)
+    print(
+        f" manifest: {manifest['n_features']} features | "
+        f"context={manifest['context_columns']} | forbidden={manifest['forbidden_columns']}"
+    )
 
     if args.legacy:
         canonical, split_name = None, "phase2-legacy-70/15/15"
