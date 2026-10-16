@@ -19,4 +19,3 @@ data/interim/*
 data/processed/*
 data/metadata/*
 !data/**/.gitkeep
-
