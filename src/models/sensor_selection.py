@@ -248,7 +248,7 @@ def run_sensor_selection(
         full_result["trial_accuracy"],
     )
 
-    logger.info("Starting Sequential Backward Elimination down to %d sensors", min_sensors)
+    logger.info("Starting Sequential Backward Elimination down to %d sensors:", min_sensors)
     selection_history = []
     while len(current) > min_sensors:
         candidates = []
@@ -282,11 +282,12 @@ def run_sensor_selection(
         selection_history.append(winner["active_sensors"])
         current = tuple(int(sensor) for sensor in winner["active_sensors"])
 
-    # Compute selection frequency of sensors and pairs across SBE steps;
-    sensor_selection_counts = {s: 0 for s in initial_sensors}
+    # These counts describe survival along this single greedy elimination path,
+    # not selection stability across independent subject samples.
+    sensor_survival_counts = {s: 0 for s in initial_sensors}
     for active_list in selection_history:
         for s in active_list:
-            sensor_selection_counts[s] += 1
+            sensor_survival_counts[s] += 1
 
     reduced_candidates = [row for row in rows if int(row["sensor_count"]) <= 3]
     meeting_target = [
@@ -341,15 +342,21 @@ def run_sensor_selection(
     pd.DataFrame(rows).to_csv(destination / "sensor_subset_results.csv", index=False)
     pd.DataFrame(test_rows).to_csv(destination / "sensor_subset_test_results.csv", index=False)
 
-    stability_summary = {
-        "sensor_selection_frequencies": sensor_selection_counts,
+    selection_summary = {
+        "sensor_survival_counts_across_elimination_steps": sensor_survival_counts,
+        "elimination_step_count": len(selection_history),
+        "selection_stability_assessed": False,
+        "sensor_survival_count_description": (
+            "Number of steps in this single SBE path where each sensor remained active; "
+            "not a cross-sample selection stability measure."
+        ),
         "recommended_sensors": list(recommended_sensors),
         "validation_macro_f1_mean": float(recommendation["trial_macro_f1"]),
         "validation_macro_f1_std": float(recommendation["trial_macro_f1_std"]),
         "fold_scores": recommendation["fold_macro_f1_scores"],
     }
-    (destination / "sensor_stability_summary.json").write_text(
-        json.dumps(stability_summary, indent=2), encoding="utf-8"
+    (destination / "sensor_selection_summary.json").write_text(
+        json.dumps(selection_summary, indent=2), encoding="utf-8"
     )
 
     handoff = {

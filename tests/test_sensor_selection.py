@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -99,3 +101,12 @@ def test_quick_sbe_writes_validation_only_handoff_and_test_comparison(tmp_path):
     assert (tmp_path / "sensor_subset_results.csv").exists()
     test_results = pd.read_csv(tmp_path / "sensor_subset_test_results.csv")
     assert set(test_results["subset"]) == {"all_sensors", "recommended_reduced"}
+    summary = json.loads((tmp_path / "sensor_selection_summary.json").read_text())
+    survival_counts = summary["sensor_survival_counts_across_elimination_steps"]
+    assert sum(survival_counts.values()) == 2
+    assert summary["elimination_step_count"] == 1
+    assert summary["selection_stability_assessed"] is False
+    assert (
+        "not a cross-sample selection stability measure"
+        in summary["sensor_survival_count_description"]
+    )
