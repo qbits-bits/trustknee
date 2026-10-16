@@ -1,10 +1,12 @@
-"""Leakage-safe Sequential Backward Elimination for TrustKnee sensors."""
+"""Leakage-safe Sequential Backward Elimination with Subject-Level Cross-Validation for TrustKnee sensors."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -17,13 +19,26 @@ from sklearn.metrics import (
     f1_score,
     recall_score,
 )
+from sklearn.model_selection import GroupKFold
 
-from src import config
-from src.contracts import get_canonical_contract
-from src.ingestion import build_manifest
-from src.models.evaluation import fixed_subject_split
-from src.models.model_data import ModelDataset, build_model_inputs
-from src.models.training import QUICK_TRAINING, TrainingConfig, fit_xgboost, predict_xgboost
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src import config  # noqa: E402
+from src.contracts import get_canonical_contract  # noqa: E402
+from src.ingestion import build_manifest  # noqa: E402
+from src.models.evaluation import fixed_subject_split  # noqa: E402
+from src.models.model_data import ModelDataset, build_model_inputs  # noqa: E402
+from src.models.training import (  # noqa: E402
+    QUICK_TRAINING,
+    TrainingConfig,
+    fit_xgboost,
+    predict_xgboost,
+)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("trustknee.models.sbe")
 
 AGGREGATION_METHODS = ("mean_probability", "majority_vote", "confidence_weighted")
 
@@ -117,57 +132,78 @@ def _metrics(labels: np.ndarray, probabilities: np.ndarray) -> dict[str, object]
 def _evaluate_subset(
     dataset: ModelDataset,
     labels: np.ndarray,
-    train_indices: np.ndarray,
-    evaluation_indices: np.ndarray,
+    dev_indices: np.ndarray,  # Groups data strictly on subject-id for multiple subject-level fold validaton;
     sensors: tuple[int, ...],
     training_config: TrainingConfig,
     seed: int,
-    aggregation_method: str | None = None,
+    n_splits: int = 5,
 ) -> tuple[dict[str, object], str]:
+    """Evaluate a sensor subset across subject-level cross-validation folds (leakage-safe)."""
     features = mask_tabular_features(dataset.xgboost_features, sensors)
-    started = time.perf_counter()
-    model = fit_xgboost(
-        features,
-        labels,
-        train_indices,
-        num_classes=2,
-        seed=seed,
-        training_config=training_config,
+    dev_metadata = dataset.metadata.iloc[dev_indices].reset_index(drop=True)
+    dev_labels = labels[dev_indices]
+
+    # Subject-level folding to prevent data leakage across subjects;
+    groups = (
+        dev_metadata["subject_id"].to_numpy()
+        if "subject_id" in dev_metadata.columns
+        else dev_metadata.get("subject", np.zeros(len(dev_metadata)))
     )
-    prediction_started = time.perf_counter()
-    probabilities = predict_xgboost(model, features.iloc[evaluation_indices], 2)
-    inference_elapsed = time.perf_counter() - prediction_started
-    elapsed = time.perf_counter() - started
-    window_metrics = _metrics(labels[evaluation_indices], probabilities)
-    methods = (aggregation_method,) if aggregation_method else AGGREGATION_METHODS
-    candidates = []
-    for method in methods:
+    gkf = GroupKFold(n_splits=min(n_splits, len(np.unique(groups))))
+
+    fold_trial_f1s = []
+    fold_trial_accs = []
+
+    started = time.perf_counter()
+    inference_elapsed_total = 0.0
+    total_eval_samples = 0
+
+    for train_fold_rel, val_fold_rel in gkf.split(dev_indices, dev_labels, groups=groups):
+        train_idx = dev_indices[train_fold_rel]
+        val_idx = dev_indices[val_fold_rel]
+
+        model = fit_xgboost(
+            features,
+            labels,
+            train_idx,
+            num_classes=2,
+            seed=seed,
+            training_config=training_config,
+        )
+        pred_started = time.perf_counter()
+        probabilities = predict_xgboost(model, features.iloc[val_idx], 2)
+        inference_elapsed_total += time.perf_counter() - pred_started
+        total_eval_samples += len(val_idx)
+
+        # Aggregate per trial using default/mean probability for CV scoring;
         trial_labels, trial_probabilities = aggregate_trial_probabilities(
             probabilities,
-            dataset.metadata.iloc[evaluation_indices],
-            labels[evaluation_indices],
-            method,
+            dataset.metadata.iloc[val_idx],
+            labels[val_idx],
+            "mean_probability",
         )
-        candidates.append((method, _metrics(trial_labels, trial_probabilities)))
-    selected_method, trial_metrics = max(
-        candidates,
-        key=lambda item: (
-            float(item[1]["macro_f1"]),
-            float(item[1]["accuracy"]),
-            -AGGREGATION_METHODS.index(item[0]),
-        ),
-    )
+        fold_metrics = _metrics(trial_labels, trial_probabilities)
+        fold_trial_f1s.append(fold_metrics["macro_f1"])
+        fold_trial_accs.append(fold_metrics["accuracy"])
+
+    elapsed = time.perf_counter() - started
+    mean_f1 = float(np.mean(fold_trial_f1s))
+    std_f1 = float(np.std(fold_trial_f1s))
+    mean_acc = float(np.mean(fold_trial_accs))
+
     result: dict[str, object] = {
         "active_sensors": list(sensors),
         "sensor_count": len(sensors),
         "feature_count": features.shape[1],
-        "aggregation_method": selected_method,
+        "aggregation_method": "mean_probability",
         "fit_predict_seconds": elapsed,
-        "latency_ms_per_window": inference_elapsed * 1000.0 / len(evaluation_indices),
+        "latency_ms_per_window": inference_elapsed_total * 1000.0 / max(1, total_eval_samples),
+        "trial_macro_f1": mean_f1,
+        "trial_macro_f1_std": std_f1,
+        "trial_accuracy": mean_acc,
+        "fold_macro_f1_scores": fold_trial_f1s,
     }
-    result.update({f"window_{key}": value for key, value in window_metrics.items()})
-    result.update({f"trial_{key}": value for key, value in trial_metrics.items()})
-    return result, selected_method
+    return result, "mean_probability"
 
 
 def run_sensor_selection(
@@ -179,44 +215,47 @@ def run_sensor_selection(
     quick: bool = False,
     initial_sensors: tuple[int, ...] = tuple(range(1, 9)),
 ) -> dict[str, object]:
-    """Run SBE on train/validation subjects and test only the recommendation."""
+    """Run SBE across subject-level folds on development subjects and test only the recommendation."""
     if min_sensors < 1 or min_sensors >= len(initial_sensors):
-        raise ValueError("min_sensors must be positive and smaller than the initial sensor count")
+        raise ValueError("min_sensors must be positive and smaller than initial sensor count")
     contract = get_canonical_contract()
-    train_indices, validation_indices, test_indices = fixed_subject_split(
+
+    logger.info("Isolating development subjects from test partition...")
+    # Strictly isolate development (train + val subjects) from test subjects;
+    train_idx_fixed, val_idx_fixed, test_indices = fixed_subject_split(
         dataset.metadata,
         contract.train_subjects,
         contract.val_subjects,
         contract.test_subjects,
     )
+    dev_indices = np.concatenate([train_idx_fixed, val_idx_fixed])
     labels = dataset.labels_binary
     training_config = QUICK_TRAINING if quick else TrainingConfig()
+
     current = tuple(sorted(initial_sensors))
     rows = []
-    full_result, _ = _evaluate_subset(
-        dataset,
-        labels,
-        train_indices,
-        validation_indices,
-        current,
-        training_config,
-        seed,
-    )
+
+    logger.info("Evaluating full baseline feature set with %d sensors...", len(current))
+    full_result, _ = _evaluate_subset(dataset, labels, dev_indices, current, training_config, seed)
     full_result["retained_performance"] = 1.0
     rows.append(full_result)
     full_f1 = float(full_result["trial_macro_f1"])
+    logger.info(
+        "Full Baseline Evaluation Complete: Sensors: %d; Trial Macro-F1: %.4f (±%.4f); Trial Accuracy: %.4f",
+        full_result["sensor_count"],
+        full_result["trial_macro_f1"],
+        full_result["trial_macro_f1_std"],
+        full_result["trial_accuracy"],
+    )
+
+    logger.info("Starting Sequential Backward Elimination down to %d sensors:", min_sensors)
+    selection_history = []
     while len(current) > min_sensors:
         candidates = []
         for removed_sensor in current:
             candidate = tuple(sensor for sensor in current if sensor != removed_sensor)
             result, _ = _evaluate_subset(
-                dataset,
-                labels,
-                train_indices,
-                validation_indices,
-                candidate,
-                training_config,
-                seed,
+                dataset, labels, dev_indices, candidate, training_config, seed
             )
             result["removed_sensor"] = removed_sensor
             candidates.append(result)
@@ -231,8 +270,24 @@ def run_sensor_selection(
         winner["retained_performance"] = (
             float(winner["trial_macro_f1"]) / full_f1 if full_f1 > 0 else 0.0
         )
+        logger.info(
+            "Pruned Sensor %s; Active sensors: %s; Trial Macro-F1: %.4f; Retained: %.2f%%",
+            winner.get("removed_sensor"),
+            winner["active_sensors"],
+            winner["trial_macro_f1"],
+            winner["retained_performance"] * 100.0,
+        )
+
         rows.append(winner)
+        selection_history.append(winner["active_sensors"])
         current = tuple(int(sensor) for sensor in winner["active_sensors"])
+
+    # These counts describe survival along this single greedy elimination path,
+    # not selection stability across independent subject samples.
+    sensor_survival_counts = {s: 0 for s in initial_sensors}
+    for active_list in selection_history:
+        for s in active_list:
+            sensor_survival_counts[s] += 1
 
     reduced_candidates = [row for row in rows if int(row["sensor_count"]) <= 3]
     meeting_target = [
@@ -244,33 +299,66 @@ def run_sensor_selection(
         else max(reduced_candidates, key=lambda row: float(row["trial_macro_f1"]))
     )
     recommended_sensors = tuple(int(sensor) for sensor in recommendation["active_sensors"])
+    logger.info("Selected optimal reduced sensor subset: %s", list(recommended_sensors))
+
+    # Final evaluation on held-out test set using the recommendation;
     test_rows = []
-    for subset_name, sensors, method in (
-        ("all_sensors", tuple(sorted(initial_sensors)), str(full_result["aggregation_method"])),
-        (
-            "recommended_reduced",
-            recommended_sensors,
-            str(recommendation["aggregation_method"]),
-        ),
+    for subset_name, sensors in (
+        ("all_sensors", tuple(sorted(initial_sensors))),
+        ("recommended_reduced", recommended_sensors),
     ):
-        result, _ = _evaluate_subset(
-            dataset,
+        logger.info("Running final evaluation on held-out test set for subset: %s", subset_name)
+        # Train on all dev indices, test on test_indices;
+        features = mask_tabular_features(dataset.xgboost_features, sensors)
+        model = fit_xgboost(
+            features,
             labels,
-            train_indices,
-            test_indices,
-            sensors,
-            training_config,
-            seed,
-            aggregation_method=method,
+            dev_indices,
+            num_classes=2,
+            seed=seed,
+            training_config=training_config,
         )
-        result["subset"] = subset_name
-        test_rows.append(result)
+        probabilities = predict_xgboost(model, features.iloc[test_indices], 2)
+        window_metrics = _metrics(labels[test_indices], probabilities)
+        trial_labels, trial_probabilities = aggregate_trial_probabilities(
+            probabilities,
+            dataset.metadata.iloc[test_indices],
+            labels[test_indices],
+            "mean_probability",
+        )
+        test_metrics = _metrics(trial_labels, trial_probabilities)
+        test_result = {
+            "subset": subset_name,
+            "active_sensors": list(sensors),
+            "sensor_count": len(sensors),
+            "test_window_macro_f1": window_metrics["macro_f1"],
+            "test_trial_macro_f1": test_metrics["macro_f1"],
+            "test_trial_accuracy": test_metrics["accuracy"],
+        }
+        test_rows.append(test_result)
 
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
-    search_frame = pd.DataFrame(rows)
-    search_frame.to_csv(destination / "sensor_subset_results.csv", index=False)
+    pd.DataFrame(rows).to_csv(destination / "sensor_subset_results.csv", index=False)
     pd.DataFrame(test_rows).to_csv(destination / "sensor_subset_test_results.csv", index=False)
+
+    selection_summary = {
+        "sensor_survival_counts_across_elimination_steps": sensor_survival_counts,
+        "elimination_step_count": len(selection_history),
+        "selection_stability_assessed": False,
+        "sensor_survival_count_description": (
+            "Number of steps in this single SBE path where each sensor remained active; "
+            "not a cross-sample selection stability measure."
+        ),
+        "recommended_sensors": list(recommended_sensors),
+        "validation_macro_f1_mean": float(recommendation["trial_macro_f1"]),
+        "validation_macro_f1_std": float(recommendation["trial_macro_f1_std"]),
+        "fold_scores": recommendation["fold_macro_f1_scores"],
+    }
+    (destination / "sensor_selection_summary.json").write_text(
+        json.dumps(selection_summary, indent=2), encoding="utf-8"
+    )
+
     handoff = {
         "selected_sensor_ids": list(recommended_sensors),
         "sensor_names": [config.SENSOR_PLACEMENT[sensor] for sensor in recommended_sensors],
@@ -278,10 +366,12 @@ def run_sensor_selection(
             sensor in recommended_sensors for sensor in range(1, config.N_SENSORS + 1)
         ],
         "validation_retained_performance": float(recommendation["retained_performance"]),
+        "validation_macro_f1_mean": float(recommendation["trial_macro_f1"]),
+        "validation_macro_f1_std": float(recommendation["trial_macro_f1_std"]),
         "target_90pct_met": float(recommendation["retained_performance"]) >= 0.9,
-        "selection_split": "validation",
+        "selection_split": "subject_level_cv",
         "test_used_for_selection": False,
-        "aggregation_method": recommendation["aggregation_method"],
+        "aggregation_method": "mean_probability",
         "seed": seed,
         "contract": asdict(contract),
         "quick": quick,
@@ -289,6 +379,11 @@ def run_sensor_selection(
     temporary = destination / "sensor_handoff.json.tmp"
     temporary.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
     temporary.replace(destination / "sensor_handoff.json")
+
+    logger.info(
+        "Successfully exported sensor handoff configuration to %s",
+        destination / "sensor_handoff.json",
+    )
     return handoff
 
 
@@ -304,15 +399,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    logger.info("Building model input dataset from manifest...")
     dataset = build_model_inputs(build_manifest(args.data_root), seed=args.seed)
-    handoff = run_sensor_selection(
+
+    run_sensor_selection(
         dataset,
         args.output_dir,
         seed=args.seed,
         min_sensors=args.min_sensors,
         quick=args.quick,
     )
-    print(json.dumps(handoff, indent=2))
+    # print(json.dumps(handoff, indent=2))
     return 0
 
 

@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+.coverage
+.vscode
 
 # raw/derived sensor data lives on Drive, not in git
 data/raw/*
